@@ -43,11 +43,16 @@ not committed to git).
   --course-json data/course-builder-data.json \
   --expert-video data/expert.mp4 \
   --worker-video data/worker.mp4 \
-  --roi configs/roi.json \
   --out outputs
 ```
 
 Or step by step: `extract-expert`, `extract-worker`, `match` (see `python -m src.main -h`).
+
+ROIs are estimated automatically per video (no manual input needed): the
+needle zone is localized from adjacent-frame motion × lamp brightness
+statistics, and the other ROIs are derived geometrically from it. The
+estimate used is saved to `outputs/<role>/roi_auto.json` and drawn in the
+overlay video. To override, pass `--roi configs/roi.json`.
 
 ## Outputs
 
@@ -64,9 +69,10 @@ outputs/reports/score_matrix.npy / .png
 
 ## Configuration
 
-- **ROIs** — `configs/roi.json`, normalized `[x1, y1, x2, y2]` (0–1), separate
-  `expert` / `worker` sections because camera framing differs. Adjust once per
-  camera setup (use `outputs/*/overlay.mp4` to verify placement).
+- **ROIs** — auto-estimated by default (`src/vision/auto_roi.py`). Optional
+  manual override: `configs/roi.json`, normalized `[x1, y1, x2, y2]` (0–1),
+  separate `expert` / `worker` sections because camera framing differs
+  (use `outputs/*/overlay.mp4` to verify placement).
 - **Viterbi penalties** — `src/matching/viterbi_decoder.py` `PENALTIES`
   (skip / extra / backward…). The decoder is duration-aware: each scene expands
   into chained sub-states enforcing a minimum dwell (half the expert scene

@@ -19,9 +19,17 @@ from src.io.load_course_data import load_task_spec
 from src.vision.roi import load_rois
 
 
-def cmd_extract(video: str, roi: str, out: str, role: str):
+def cmd_extract(video: str, roi: str | None, out: str, role: str):
     from src.vision.extract_frame_features import extract_video_features
-    rois = load_rois(roi, role)
+    if roi:
+        rois = load_rois(roi, role)
+    else:
+        from src.vision.auto_roi import estimate_rois
+        print(f"Estimating ROIs automatically for {video} ...")
+        rois = estimate_rois(video)
+        Path(out).mkdir(parents=True, exist_ok=True)
+        (Path(out) / "roi_auto.json").write_text(json.dumps(rois, indent=2))
+        print(f"  needle={rois['needle']} (saved to {out}/roi_auto.json)")
     extract_video_features(video, rois, out)
 
 
@@ -112,12 +120,12 @@ def main():
     p = sub.add_parser("extract-expert")
     p.add_argument("--course-json", required=True)
     p.add_argument("--video", required=True)
-    p.add_argument("--roi", required=True)
+    p.add_argument("--roi", default=None, help="optional ROI config; auto-estimated when omitted")
     p.add_argument("--out", required=True)
 
     p = sub.add_parser("extract-worker")
     p.add_argument("--video", required=True)
-    p.add_argument("--roi", required=True)
+    p.add_argument("--roi", default=None, help="optional ROI config; auto-estimated when omitted")
     p.add_argument("--out", required=True)
 
     p = sub.add_parser("match")
@@ -130,7 +138,7 @@ def main():
     p.add_argument("--course-json", required=True)
     p.add_argument("--expert-video", required=True)
     p.add_argument("--worker-video", required=True)
-    p.add_argument("--roi", required=True)
+    p.add_argument("--roi", default=None, help="optional ROI config; auto-estimated when omitted")
     p.add_argument("--out", required=True)
 
     args = ap.parse_args()
