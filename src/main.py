@@ -26,7 +26,7 @@ def cmd_extract(video: str, out: str):
 def cmd_match(expert_dir: str, worker_dir: str, course_json: str, out: str):
     from src.matching import viterbi_decoder
     from src.matching.similarity import build_templates, prepare_features, window_scores
-    from src.reporting.build_report import build_report, detect_errors
+    from src.reporting.build_report import build_report, detect_errors, format_report_text
     from src.reporting.visualize_alignment import save_score_matrix, save_timeline_html
     from src.segmentation.candidate_windows import (
         STRIDE_S, WINDOW_SIZES_S, all_candidates, grid_steps)
@@ -94,12 +94,8 @@ def cmd_match(expert_dir: str, worker_dir: str, course_json: str, out: str):
                           expert_meta.get("video", ""), worker_meta.get("video", ""), out_dir)
     save_timeline_html(report, scenes, out_dir)
 
-    s = report["summary"]
-    print(f"\nTask: {report['task_name']}")
-    print(f"Segments: {s['num_detected_segments']}  missing={s['missing_count']} "
-          f"extra={s['extra_count']} wrong_order={s['wrong_order_count']} "
-          f"duplicated={s['duplicated_count']}  overall={s['overall_score']}")
-    print(f"Reports written to {out_dir}")
+    print("\n" + format_report_text(report))
+    print(f"\nReports written to {out_dir}")
 
 
 def main():

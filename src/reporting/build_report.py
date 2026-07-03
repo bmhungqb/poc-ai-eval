@@ -28,7 +28,8 @@ def detect_errors(segments: list[DecodedSegment], scenes, task_spec) -> list[dic
                 "expert_scene_index": sc.scene_index,
                 "operations": sc.operations,
                 "expert_time": [sc.start, sc.end],
-                "message": f"Expert scene {sc.scene_index} ({sc.label}) has no confident match in the worker video.",
+                "message": f"Scene {sc.scene_index} ({sc.label}), expected at {sc.start:.1f}-{sc.end:.1f}s "
+                           f"(expert), has no confident match in the worker video.",
             })
 
     # WRONG_ORDER: backward transition between matched scenes
@@ -43,7 +44,9 @@ def detect_errors(segments: list[DecodedSegment], scenes, task_spec) -> list[dic
                 "expert_scene_index": idx,
                 "operations": seg.operations,
                 "worker_time": [seg.start_time, seg.end_time],
-                "message": f"Worker performed scene {idx} ({' + '.join(seg.operations)}) after scene {prev_idx} — out of expert order.",
+                "message": f"Scene {idx} ({' + '.join(seg.operations)}) performed at "
+                           f"{seg.start_time:.1f}-{seg.end_time:.1f}s (worker), after scene {prev_idx} "
+                           f"— out of expert order.",
             })
         prev_idx = idx
 
@@ -73,7 +76,9 @@ def detect_errors(segments: list[DecodedSegment], scenes, task_spec) -> list[dic
                 "expert_scene_index": idx,
                 "operations": ops,
                 "worker_time": [[r.start_time, r.end_time] for r in runs],
-                "message": f"Scene {idx} ({scenes[idx].label}) was matched {len(runs)} separate times (expected {allowed}).",
+                "message": f"Scene {idx} ({scenes[idx].label}) was matched {len(runs)} separate times "
+                           f"(expected {allowed}), at: "
+                           + ", ".join(f"{r.start_time:.1f}-{r.end_time:.1f}s" for r in runs) + ".",
             })
     return errors
 
@@ -140,3 +145,31 @@ def build_report(task_spec, segments: list[DecodedSegment], errors: list[dict],
     csv_rows = [{**r, "operations": " + ".join(r["operations"])} for r in seg_rows]
     pd.DataFrame(csv_rows).to_csv(out_dir / "alignment_report.csv", index=False)
     return report
+
+
+ERROR_TYPE_ORDER = ["MISSING", "WRONG_ORDER", "EXTRA_ACTION", "DUPLICATED_ACTION"]
+
+
+def format_report_text(report: dict) -> str:
+    """Human-readable console summary: which operations are missing/extra/
+    wrong-order/duplicated, by name and timestamp (not just counts)."""
+    s = report["summary"]
+    lines = [
+        f"Task: {report['task_name']}",
+        f"Segments: {s['num_detected_segments']}/{s['num_expected_scenes']}  "
+        f"missing={s['missing_count']} extra={s['extra_count']} "
+        f"wrong_order={s['wrong_order_count']} duplicated={s['duplicated_count']}  "
+        f"avg_confidence={s['avg_matched_confidence']}  overall={s['overall_score']}",
+    ]
+    by_type: dict[str, list[dict]] = {}
+    for e in report["errors"]:
+        by_type.setdefault(e["type"], []).append(e)
+    if not by_type:
+        lines.append("No errors detected.")
+    for etype in ERROR_TYPE_ORDER:
+        group = by_type.get(etype)
+        if not group:
+            continue
+        lines.append(f"\n{etype} ({len(group)}):")
+        lines.extend(f"  - {e['message']}" for e in group)
+    return "\n".join(lines)
