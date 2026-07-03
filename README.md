@@ -9,7 +9,7 @@ Implements the pipeline described in `plan.md`:
 expert video + expert JSON      worker video
         │                            │
         ▼                            ▼
-  per-frame signals (MediaPipe Hands+Pose, Farneback optical flow, ROI events)
+  per-frame signals (WiLoR hand keypoints, Farneback optical flow, ROI events)
         │                            │
   expert scene templates      candidate windows (multi-scale sliding + change-points)
         └────────────┬───────────────┘
@@ -23,8 +23,14 @@ expert video + expert JSON      worker video
 
 ## Setup
 
-Requires Python 3.12 (MediaPipe does not support 3.13+; legacy `solutions` API
-needs `mediapipe<=0.10.14`).
+Hand keypoints come from [WiLoR](https://github.com/rolpotamias/WiLoR) (a YOLO
+hand detector + a transformer model that regresses full 3D hand pose/mesh,
+via the [`wilor-mini`](https://github.com/warmshao/WiLoR-mini) packaging —
+CPU or CUDA, no mmcv/mmdet build chain). It also classifies handedness
+directly, which we rely on for left/right hand assignment (see Notes below).
+Model weights (~200 MB, PyTorch) are downloaded automatically from Hugging
+Face on first run. Requires PyTorch — install a CUDA build first if a GPU is
+available, otherwise the default CPU wheel from `requirements.txt` is used.
 
 ```bash
 uv venv --python 3.12 .venv
@@ -96,5 +102,11 @@ outputs/reports/score_matrix.npy / .png
   mismatch cancels out.
 - Image-embedding similarity (0.05 weight) is deferred, as the plan allows for
   version 1; its weight was folded into the duration term.
-- MediaPipe hand left/right labels are unreliable on third-person footage, so
-  hands are re-ordered by x-position as a heuristic.
+- Hand detector backend moved from MediaPipe → RTMPose-Hand → WiLoR. WiLoR's
+  YOLO hand detector classifies handedness (anatomical left/right) directly,
+  so `left_hand`/`right_hand` are now assigned from that instead of the
+  x-position heuristic used previously (still correct for a seated operator
+  filmed from above/front, where anatomical and screen side coincide).
+- The plan's MediaPipe Pose wrist fallback was dropped with the move off
+  MediaPipe; short detection gaps are covered by interpolation in
+  `prepare_features` instead.

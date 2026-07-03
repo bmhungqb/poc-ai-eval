@@ -1,6 +1,8 @@
-# Requires Python 3.12 (MediaPipe does not support 3.13+)
 opencv-python>=4.9
-mediapipe==0.10.14
+# WiLoR (3D hand localization/reconstruction): YOLO hand detector + WiLoR pose model
+# https://github.com/warmshao/WiLoR-mini — pulls in torch/ultralytics/huggingface_hub/scikit-image
+wilor-mini @ git+https://github.com/warmshao/WiLoR-mini
+torch>=2.1
 numpy>=1.26
 pandas>=2.2
 scipy>=1.13

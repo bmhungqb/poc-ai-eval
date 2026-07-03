@@ -1,8 +1,9 @@
-"""Per-frame signal extraction: MediaPipe Hands + Pose, Farneback optical flow per ROI.
+"""Per-frame signal extraction: WiLoR (YOLO hand detector + WiLoR 3D hand
+pose/mesh reconstruction) for hand landmarks, Farneback optical flow per ROI.
 
 Produces, per video:
   <out>/frame_features.csv   one row per frame
-  <out>/keypoints.jsonl      raw hand/pose landmarks per frame
+  <out>/keypoints.jsonl      raw hand landmarks per frame
   <out>/overlay.mp4          debug overlay video
 """
 from __future__ import annotations
@@ -15,22 +16,27 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
+from src.vision.hand_model import WiLorHand
 from src.vision.roi import roi_center, roi_to_pixels
 
 FLOW_ROIS = ["needle", "fabric_area", "machine_button", "lever"]
-FLOW_SCALE_WIDTH = 320  # dense flow computed on a downscaled gray frame
+FLOW_SCALE_WIDTH = 320   # dense flow computed on a downscaled gray frame
+HAND_SCORE_THRESH = 0.3  # min YOLO hand-detector confidence to accept a detected hand
+                         # (gloved hands on low-res factory footage score low)
 
 
-def _hand_summary(landmarks) -> dict:
-    xs = np.array([lm.x for lm in landmarks])
-    ys = np.array([lm.y for lm in landmarks])
+def _hand_summary(kps: np.ndarray, score: float) -> dict:
+    """kps: (21, 2) normalized keypoints, WiLoR/MANO hand layout (wrist=0,
+    thumb tip=4, index tip=8 — same ordering as MediaPipe)."""
+    xs, ys = kps[:, 0], kps[:, 1]
     return {
         "cx": float(xs.mean()),
         "cy": float(ys.mean()),
+        "score": float(score),
         "bbox": [float(xs.min()), float(ys.min()), float(xs.max()), float(ys.max())],
-        "index_tip": [float(landmarks[8].x), float(landmarks[8].y)],
-        "thumb_tip": [float(landmarks[4].x), float(landmarks[4].y)],
-        "keypoints": [[float(lm.x), float(lm.y)] for lm in landmarks],
+        "index_tip": [float(kps[8, 0]), float(kps[8, 1])],
+        "thumb_tip": [float(kps[4, 0]), float(kps[4, 1])],
+        "keypoints": kps.tolist(),
     }
 
 
@@ -56,8 +62,6 @@ def extract_video_features(
     overlay: bool = True,
     max_frames: int | None = None,
 ) -> pd.DataFrame:
-    import mediapipe as mp
-
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -83,16 +87,7 @@ def extract_video_features(
             str(out_dir / "overlay.mp4"), cv2.VideoWriter_fourcc(*"mp4v"), fps, (ow, oh)
         )
 
-    hands = mp.solutions.hands.Hands(
-        static_image_mode=False, max_num_hands=2,
-        min_detection_confidence=0.4, min_tracking_confidence=0.4,
-    )
-    pose = mp.solutions.pose.Pose(
-        static_image_mode=False, model_complexity=0,
-        min_detection_confidence=0.4, min_tracking_confidence=0.4,
-    )
-    POSE_IDX = {"left_wrist": 15, "right_wrist": 16, "left_elbow": 13, "right_elbow": 14,
-                "left_shoulder": 11, "right_shoulder": 12}
+    hand_model = WiLorHand(conf_thresh=HAND_SCORE_THRESH)  # YOLO hand det + WiLoR 3D pose
 
     rows: list[dict] = []
     prev_gray = None
@@ -104,38 +99,21 @@ def extract_video_features(
         ok, frame = cap.read()
         if not ok:
             break
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         small_gray = cv2.cvtColor(cv2.resize(frame, flow_size), cv2.COLOR_BGR2GRAY)
 
-        # --- hands ---
-        hres = hands.process(rgb)
+        # --- hands (WiLoR: YOLO hand detector + WiLoR 3D pose/mesh model) ---
+        raw_hands = hand_model(frame)
+        by_side: dict[str, list[dict]] = {"left": [], "right": []}
+        for h in raw_hands:
+            kps_norm = h["keypoints"].astype(np.float64) / np.array([width, height])
+            side = "right" if h["is_right"] else "left"
+            by_side[side].append(_hand_summary(kps_norm, h["score"]))
+        # handedness comes straight from the detector; if it (rarely) yields
+        # more than one hand on a side, keep the most confident one
         hand_info: dict[str, dict | None] = {"left": None, "right": None}
-        if hres.multi_hand_landmarks:
-            for lm, handed in zip(hres.multi_hand_landmarks, hres.multi_handedness):
-                # MediaPipe labels assume mirrored webcam view; on third-person video
-                # the label is unreliable, so also fall back to x-position ordering.
-                label = handed.classification[0].label.lower()
-                side = "left" if label == "left" else "right"
-                if hand_info[side] is not None:
-                    side = "left" if hand_info["left"] is None else "right"
-                hand_info[side] = _hand_summary(lm.landmark)
-            if hand_info["left"] and hand_info["right"] and hand_info["left"]["cx"] > hand_info["right"]["cx"]:
-                hand_info["left"], hand_info["right"] = hand_info["right"], hand_info["left"]
-
-        # --- pose ---
-        pres = pose.process(rgb)
-        pose_pts = {}
-        if pres.pose_landmarks:
-            for name, idx in POSE_IDX.items():
-                lm = pres.pose_landmarks.landmark[idx]
-                if lm.visibility > 0.3:
-                    pose_pts[name] = (float(lm.x), float(lm.y))
-        # fallback: use wrist as hand center when hand detector failed
         for side in ("left", "right"):
-            if hand_info[side] is None and f"{side}_wrist" in pose_pts:
-                wx, wy = pose_pts[f"{side}_wrist"]
-                hand_info[side] = {"cx": wx, "cy": wy, "bbox": [wx - 0.05, wy - 0.05, wx + 0.05, wy + 0.05],
-                                   "index_tip": [wx, wy], "thumb_tip": [wx, wy], "keypoints": [], "from_pose": True}
+            if by_side[side]:
+                hand_info[side] = max(by_side[side], key=lambda s: s["score"])
 
         # --- optical flow ---
         flow_feats = {}
@@ -197,7 +175,6 @@ def extract_video_features(
             "right_hand": {k: v for k, v in (ri or {}).items() if k != "keypoints"} if ri else None,
             "left_hand_keypoints": li["keypoints"] if li else None,
             "right_hand_keypoints": ri["keypoints"] if ri else None,
-            "pose": pose_pts,
         }) + "\n")
 
         if writer is not None:
@@ -225,8 +202,6 @@ def extract_video_features(
     kp_file.close()
     if writer is not None:
         writer.release()
-    hands.close()
-    pose.close()
 
     df = pd.DataFrame(rows)
     df.attrs["fps"] = fps
