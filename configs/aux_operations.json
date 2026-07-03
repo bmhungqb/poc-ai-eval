@@ -1,0 +1,5 @@
+{
+  "_comment": "Ghi đè heuristic tách thao tác chính/phụ trong scene composite (src/vlm/aux_check.py: mặc định op có TMU lớn nhất là chính, còn lại là phụ). 'always_aux': op luôn là thao tác phụ khi đứng cùng op khác; 'never_aux': op luôn là thao tác chính.",
+  "always_aux": ["Điều chỉnh mép", "Cắt chỉ"],
+  "never_aux": ["Diễu cạnh dài", "Diễu góc tròn"]
+}

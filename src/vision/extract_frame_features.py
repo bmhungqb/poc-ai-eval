@@ -1,10 +1,17 @@
 """Per-frame signal extraction: WiLoR (YOLO hand detector + WiLoR 3D hand
 pose/mesh reconstruction) for hand landmarks, Farneback optical flow per hand.
 
+Detection runs on the fixed work-area ROI (crop + upscale, see
+src/vision/work_area_roi.py) so hands cover more pixels on low-res factory
+footage; keypoints are mapped back to full-frame coordinates, so everything
+downstream (features, overlay, matching) is unchanged.
+
 Produces, per video:
-  <out>/frame_features.csv   one row per frame
-  <out>/keypoints.jsonl      raw hand landmarks per frame
-  <out>/overlay.mp4          debug overlay video
+  <out>/frame_features.csv     one row per frame
+  <out>/keypoints.jsonl        raw hand landmarks per frame
+  <out>/embeddings.npy         per-frame DINOv2 embedding of the hands' crop
+  <out>/work_area_roi.json     the ROI used (reused by the VLM stages)
+  <out>/overlay.mp4            debug overlay video
 """
 from __future__ import annotations
 
@@ -19,6 +26,8 @@ from tqdm import tqdm
 from src.vision.embed_model import MODEL_NAME as EMBED_MODEL_NAME
 from src.vision.embed_model import DinoEmbedder
 from src.vision.hand_model import WiLorHand
+from src.vision.work_area_roi import (
+    DEFAULT_UPSCALE_WIDTH, ROI_FILENAME, RoiMapper, estimate_roi_from_video, load_roi, save_roi)
 
 FLOW_SCALE_WIDTH = 320   # dense flow computed on a downscaled gray frame
 HAND_SCORE_THRESH = 0.3  # min YOLO hand-detector confidence to accept a detected hand
@@ -52,11 +61,17 @@ def _hand_summary(kps: np.ndarray, score: float) -> dict:
     }
 
 
-def _embed_crop_bbox(hand_info: dict, width: int, height: int) -> tuple[int, int, int, int]:
+def _embed_crop_bbox(hand_info: dict, width: int, height: int,
+                     mapper: RoiMapper | None = None) -> tuple[int, int, int, int]:
     """Padded pixel bbox around whichever hands are present, for the
-    embedding crop. Falls back to the full frame if neither hand is
-    detected (still gives the embedding model something to work with)."""
-    boxes = [_bbox_to_pixels(hi["bbox"], width, height) for hi in hand_info.values() if hi]
+    embedding crop. Coordinates are in the processing frame (the ROI crop
+    when a mapper is given, else the full frame). Falls back to the whole
+    processing frame if neither hand is detected (still gives the embedding
+    model something to work with)."""
+    if mapper is not None:
+        boxes = [mapper.full_norm_bbox_to_crop_px(hi["bbox"]) for hi in hand_info.values() if hi]
+    else:
+        boxes = [_bbox_to_pixels(hi["bbox"], width, height) for hi in hand_info.values() if hi]
     if not boxes:
         return 0, 0, width, height
     x1 = min(b[0] for b in boxes)
@@ -88,7 +103,13 @@ def extract_video_features(
     out_dir: str | Path,
     overlay: bool = True,
     max_frames: int | None = None,
+    roi: str | dict | None = "auto",
+    roi_upscale_width: int = DEFAULT_UPSCALE_WIDTH,
 ) -> pd.DataFrame:
+    """`roi` selects the work-area ROI (proposal §3.3): "auto" estimates it
+    with a sampling pass over the video, a path/dict uses a saved
+    work_area_roi.json (or legacy roi_auto.json), None disables cropping
+    (previous behavior)."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -102,8 +123,30 @@ def extract_video_features(
     if max_frames:
         n_frames = min(n_frames, max_frames)
 
-    flow_scale = FLOW_SCALE_WIDTH / width
-    flow_size = (FLOW_SCALE_WIDTH, int(height * flow_scale))
+    hand_model = WiLorHand(conf_thresh=HAND_SCORE_THRESH)  # YOLO hand det + WiLoR 3D pose
+    embedder = DinoEmbedder()  # frame-level embedding for image_embed nearest-neighbor score
+
+    # --- work-area ROI (crop + upscale before hand detection) ---
+    roi_data: dict | None = None
+    if roi == "auto":
+        print(f"estimating work-area ROI ({Path(video_path).name})...")
+        work_area = estimate_roi_from_video(video_path, hand_model=hand_model)
+        roi_data = save_roi(out_dir / ROI_FILENAME, work_area)
+    elif isinstance(roi, (str, Path)):
+        roi_data = load_roi(roi)
+        save_roi(out_dir / ROI_FILENAME, roi_data["work_area"], roi_data.get("zones"),
+                 source=roi_data.get("source", "file"))
+    elif isinstance(roi, dict):
+        roi_data = roi if "work_area" in roi else {"work_area": [0, 0, 1, 1], "zones": {}}
+        save_roi(out_dir / ROI_FILENAME, roi_data["work_area"], roi_data.get("zones"),
+                 source=roi_data.get("source", "dict"))
+    mapper = (RoiMapper(roi_data["work_area"], width, height, roi_upscale_width)
+              if roi_data is not None else None)
+    # dimensions of the frame the detectors/flow actually see
+    proc_w, proc_h = (mapper.out_w, mapper.out_h) if mapper else (width, height)
+
+    flow_scale = FLOW_SCALE_WIDTH / proc_w
+    flow_size = (FLOW_SCALE_WIDTH, max(2, int(proc_h * flow_scale)))
 
     writer = None
     if overlay:
@@ -112,9 +155,6 @@ def extract_video_features(
         writer = cv2.VideoWriter(
             str(out_dir / "overlay.mp4"), cv2.VideoWriter_fourcc(*"mp4v"), fps, (ow, oh)
         )
-
-    hand_model = WiLorHand(conf_thresh=HAND_SCORE_THRESH)  # YOLO hand det + WiLoR 3D pose
-    embedder = DinoEmbedder()  # frame-level embedding for image_embed nearest-neighbor score
 
     rows: list[dict] = []
     embeddings: list[np.ndarray] = []
@@ -127,13 +167,19 @@ def extract_video_features(
         ok, frame = cap.read()
         if not ok:
             break
-        small_gray = cv2.cvtColor(cv2.resize(frame, flow_size), cv2.COLOR_BGR2GRAY)
+        proc = mapper.crop(frame) if mapper else frame  # what the detectors see
+        small_gray = cv2.cvtColor(cv2.resize(proc, flow_size), cv2.COLOR_BGR2GRAY)
 
         # --- hands (WiLoR: YOLO hand detector + WiLoR 3D pose/mesh model) ---
-        raw_hands = hand_model(frame)
+        # detect on the (cropped + upscaled) processing frame, then map the
+        # keypoints back to full-frame normalized coordinates
+        raw_hands = hand_model(proc)
         by_side: dict[str, list[dict]] = {"left": [], "right": []}
         for h in raw_hands:
-            kps_norm = h["keypoints"].astype(np.float64) / np.array([width, height])
+            kps_px = h["keypoints"].astype(np.float64)
+            if mapper:
+                kps_px = mapper.to_full_px(kps_px)
+            kps_norm = kps_px / np.array([width, height])
             side = "right" if h["is_right"] else "left"
             by_side[side].append(_hand_summary(kps_norm, h["score"]))
         # handedness comes straight from the detector; if it (rarely) yields
@@ -144,10 +190,10 @@ def extract_video_features(
                 hand_info[side] = max(by_side[side], key=lambda s: s["score"])
 
         # --- image embedding (hands' union bbox, padded) ---
-        ex1, ey1, ex2, ey2 = _embed_crop_bbox(hand_info, width, height)
-        embeddings.append(embedder(frame[ey1:ey2, ex1:ex2]))
+        ex1, ey1, ex2, ey2 = _embed_crop_bbox(hand_info, width, height, mapper)
+        embeddings.append(embedder(proc[ey1:ey2, ex1:ex2]))
 
-        # --- optical flow ---
+        # --- optical flow (on the processing frame) ---
         flow_feats = {}
         if prev_gray is not None:
             flow = cv2.calcOpticalFlowFarneback(prev_gray, small_gray, None,
@@ -155,7 +201,9 @@ def extract_video_features(
             for side in ("left", "right"):
                 hi = hand_info[side]
                 if hi:
-                    st = _flow_stats(flow, _bbox_to_pixels(hi["bbox"], width, height), flow_scale)
+                    bbox_px = (mapper.full_norm_bbox_to_crop_px(hi["bbox"]) if mapper
+                               else _bbox_to_pixels(hi["bbox"], width, height))
+                    st = _flow_stats(flow, bbox_px, flow_scale)
                 else:
                     st = {"mean_mag": 0.0, "max_mag": 0.0, "p90_mag": 0.0, "mean_dx": 0.0, "mean_dy": 0.0}
                 for k, v in st.items():
@@ -200,6 +248,9 @@ def extract_video_features(
 
         if writer is not None:
             vis = frame.copy()
+            if mapper:
+                cv2.rectangle(vis, (mapper.x0, mapper.y0), (mapper.x1, mapper.y1),
+                              (255, 255, 0), 1)
             for side, color in (("left", (0, 255, 0)), ("right", (0, 128, 255))):
                 hi = hand_info[side]
                 if hi:
@@ -226,5 +277,6 @@ def extract_video_features(
     np.save(out_dir / "embeddings.npy", embed_arr)
     (out_dir / "meta.json").write_text(json.dumps(
         {"video": str(video_path), "fps": fps, "width": width, "height": height, "n_frames": len(df),
-         "embed_model": EMBED_MODEL_NAME, "embed_dim": embed_arr.shape[1]}))
+         "embed_model": EMBED_MODEL_NAME, "embed_dim": embed_arr.shape[1],
+         "work_area_roi": roi_data["work_area"] if roi_data else None}))
     return df

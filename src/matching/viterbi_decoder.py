@@ -22,6 +22,14 @@ PENALTIES = {
     "end_skip": 1.0,    # per scene left unvisited at the end
 }
 
+# With VLM emissions blended in, per-step log-prob differences are much larger
+# than with the near-uniform pose/flow emissions the penalties above were tuned
+# against (proposal §3.4: backward/reenter were high enough that the cheapest
+# path was always "walk every scene in order" regardless of video content).
+# Lower penalties let sustained VLM evidence actually create skips/duplicates.
+PENALTIES_VLM = {**PENALTIES, "skip": 1.0, "backward": 2.5, "reenter": 2.5,
+                 "start_skip": 0.7, "end_skip": 0.7}
+
 
 @dataclass
 class DecodedSegment:
@@ -65,14 +73,16 @@ def _build_states(n_scenes: int, dwell_steps: list[int]):
 
 
 def decode(emissions: np.ndarray, extra_emission: np.ndarray,
-           dwell_steps: list[int]) -> list[int]:
+           dwell_steps: list[int], penalties: dict | None = None) -> list[int]:
     """emissions: (T, N) per-step scene emissions; extra_emission: (T,).
     dwell_steps[i]: minimum observation steps scene i must occupy if visited.
+    penalties: transition penalty set (defaults to PENALTIES; use
+    PENALTIES_VLM when VLM emissions are blended in).
 
     Returns state path of length T: scene index, or -1 for EXTRA.
     """
     T, N = emissions.shape
-    p = PENALTIES
+    p = penalties or PENALTIES
     scene_of_state, entry, stay, extra, S = _build_states(N, dwell_steps)
 
     pen = np.full((S, S), np.inf)
@@ -134,7 +144,10 @@ def decode(emissions: np.ndarray, extra_emission: np.ndarray,
 def merge_path(path: list[int], step_times: list[float], step_duration: float,
                emissions: np.ndarray, extra_emission: np.ndarray,
                scenes) -> list[DecodedSegment]:
-    """Merge consecutive equal states into segments; confidence = mean raw score."""
+    """Merge consecutive equal states into segments; confidence = mean of the
+    passed emission matrix over the segment's steps (pass whichever matrix was
+    actually decoded — for the VLM pipeline that is the blended, probability-
+    like matrix, so confidence is comparable to 1/n_scenes uniform)."""
     segments: list[DecodedSegment] = []
     t0 = 0
     for t in range(1, len(path) + 1):

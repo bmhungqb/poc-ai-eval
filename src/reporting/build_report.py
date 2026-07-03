@@ -10,14 +10,38 @@ from src.matching.viterbi_decoder import DecodedSegment
 
 TIMING = {"too_fast": 0.6, "too_slow": 1.6}
 MIN_EXTRA_DURATION = 0.6      # ignore blips shorter than this
-LOW_CONFIDENCE = 0.35
+
+# no-confident-match thresholds (proposal §3.4): segment confidence is the
+# mean decoded emission probability, so it is judged relative to the uniform
+# level 1/n_scenes. Below UNMATCHED_REL the emission carries no information
+# and the segment must not be presented as a match; below LOW_CONF_REL it is
+# a match but flagged.
+UNMATCHED_REL = 1.15
+LOW_CONF_REL = 1.6
+
+
+def segment_status(seg: DecodedSegment, n_scenes: int) -> str:
+    if seg.matched_expert_scene_index is None:
+        return "EXTRA"
+    # a probability can never exceed uniform by the required ratio when there
+    # are fewer than ~2 scenes (degenerate softmax), so floor the divisor
+    rel = seg.confidence * max(n_scenes, 2)
+    if rel < UNMATCHED_REL:
+        return "UNMATCHED"
+    if rel < LOW_CONF_REL:
+        return "LOW_CONFIDENCE"
+    return "MATCHED"
 
 
 def detect_errors(segments: list[DecodedSegment], scenes, task_spec) -> list[dict]:
     errors: list[dict] = []
     scene_runs: dict[int, list[DecodedSegment]] = {}
     for seg in segments:
-        if seg.matched_expert_scene_index is not None:
+        # UNMATCHED segments are not confident matches: they must not "visit"
+        # a scene (the scene should surface as MISSING instead of being
+        # silently satisfied by a forced match)
+        if seg.matched_expert_scene_index is not None and \
+                segment_status(seg, len(scenes)) != "UNMATCHED":
             scene_runs.setdefault(seg.matched_expert_scene_index, []).append(seg)
 
     # MISSING: expert scenes never visited
@@ -36,7 +60,7 @@ def detect_errors(segments: list[DecodedSegment], scenes, task_spec) -> list[dic
     prev_idx = None
     for seg in segments:
         idx = seg.matched_expert_scene_index
-        if idx is None:
+        if idx is None or segment_status(seg, len(scenes)) == "UNMATCHED":
             continue
         if prev_idx is not None and idx < prev_idx:
             errors.append({
@@ -93,7 +117,9 @@ def timing_status(worker_dur: float, expert_dur: float) -> str:
 
 
 def build_report(task_spec, segments: list[DecodedSegment], errors: list[dict],
-                 expert_video: str, worker_video: str, out_dir: str | Path) -> dict:
+                 expert_video: str, worker_video: str, out_dir: str | Path,
+                 aux_checklist: list[dict] | None = None,
+                 emission_source: str = "pose_flow") -> dict:
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     scenes = task_spec.expert_scenes
@@ -101,11 +127,9 @@ def build_report(task_spec, segments: list[DecodedSegment], errors: list[dict],
     seg_rows = []
     for seg in segments:
         idx = seg.matched_expert_scene_index
-        if idx is None:
-            status, tstat = "EXTRA", ""
-        else:
-            status = "LOW_CONFIDENCE" if seg.confidence < LOW_CONFIDENCE else "MATCHED"
-            tstat = timing_status(seg.end_time - seg.start_time, scenes[idx].duration)
+        status = segment_status(seg, len(scenes))
+        tstat = ("" if idx is None or status == "UNMATCHED"
+                 else timing_status(seg.end_time - seg.start_time, scenes[idx].duration))
         seg_rows.append({
             "worker_start": round(seg.start_time, 2),
             "worker_end": round(seg.end_time, 2),
@@ -123,27 +147,41 @@ def build_report(task_spec, segments: list[DecodedSegment], errors: list[dict],
         "extra_count": sum(e["type"] == "EXTRA_ACTION" for e in errors),
         "wrong_order_count": sum(e["type"] == "WRONG_ORDER" for e in errors),
         "duplicated_count": sum(e["type"] == "DUPLICATED_ACTION" for e in errors),
+        "unmatched_count": sum(r["status"] == "UNMATCHED" for r in seg_rows),
+        "low_confidence_count": sum(r["status"] == "LOW_CONFIDENCE" for r in seg_rows),
     }
     matched = [r for r in seg_rows if r["status"] == "MATCHED"]
     penalty = (1.5 * counts["missing_count"] + 0.8 * counts["extra_count"]
                + 3.0 * counts["wrong_order_count"] + 1.0 * counts["duplicated_count"])
+    # avg confidence expressed relative to uniform (1.0 = uninformative,
+    # capped at LOW_CONF_REL for the 0-10 score so it stays comparable)
     avg_conf = sum(r["confidence"] for r in matched) / len(matched) if matched else 0.0
-    overall = max(0.0, round(10 * avg_conf - penalty, 2))
+    conf_score = min(1.0, (avg_conf * len(scenes)) / LOW_CONF_REL) if matched else 0.0
+    overall = max(0.0, round(10 * conf_score - penalty, 2))
+
+    aux = aux_checklist or []
+    aux_counts = {v: sum(1 for a in aux if a["verdict"] == v)
+                  for v in ("present", "absent", "uncertain")}
 
     report = {
         "task_name": task_spec.task_name,
         "expert_video": expert_video,
         "worker_video": worker_video,
+        "emission_source": emission_source,
         "summary": {**counts, "avg_matched_confidence": round(avg_conf, 3),
-                    "overall_score": overall},
+                    "overall_score": overall,
+                    "aux_checks": aux_counts},
         "segments": seg_rows,
         "errors": errors,
+        "aux_checklist": aux,
     }
     (out_dir / "alignment_report.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
 
     csv_rows = [{**r, "operations": " + ".join(r["operations"])} for r in seg_rows]
     pd.DataFrame(csv_rows).to_csv(out_dir / "alignment_report.csv", index=False)
+    if aux:
+        pd.DataFrame(aux).to_csv(out_dir / "aux_checklist.csv", index=False)
     return report
 
 
@@ -155,10 +193,11 @@ def format_report_text(report: dict) -> str:
     wrong-order/duplicated, by name and timestamp (not just counts)."""
     s = report["summary"]
     lines = [
-        f"Task: {report['task_name']}",
+        f"Task: {report['task_name']}  (emission: {report.get('emission_source', 'pose_flow')})",
         f"Segments: {s['num_detected_segments']}/{s['num_expected_scenes']}  "
         f"missing={s['missing_count']} extra={s['extra_count']} "
-        f"wrong_order={s['wrong_order_count']} duplicated={s['duplicated_count']}  "
+        f"wrong_order={s['wrong_order_count']} duplicated={s['duplicated_count']} "
+        f"unmatched={s.get('unmatched_count', 0)} low_conf={s.get('low_confidence_count', 0)}  "
         f"avg_confidence={s['avg_matched_confidence']}  overall={s['overall_score']}",
     ]
     by_type: dict[str, list[dict]] = {}
@@ -172,4 +211,16 @@ def format_report_text(report: dict) -> str:
             continue
         lines.append(f"\n{etype} ({len(group)}):")
         lines.extend(f"  - {e['message']}" for e in group)
+
+    aux = report.get("aux_checklist") or []
+    if aux:
+        marks = {"present": "[x]", "absent": "[ ]", "uncertain": "[?]"}
+        lines.append(f"\nAux-operation checklist ({len(aux)}):")
+        for a in aux:
+            when = (f" @ {a['worker_time'][0]:.1f}-{a['worker_time'][1]:.1f}s"
+                    if a.get("worker_time") else "")
+            lines.append(f"  {marks.get(a['verdict'], '[?]')} scene {a['scene_index']} "
+                         f"'{a['operation']}' -> {a['verdict']} "
+                         f"(conf={a['confidence']:.2f}){when}"
+                         + (f" — {a['evidence']}" if a.get("evidence") else ""))
     return "\n".join(lines)

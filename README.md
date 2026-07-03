@@ -1,14 +1,18 @@
 # Sewing Operation Alignment POC
 
 Compares a worker sewing video against an expert reference video and reports
-missing / wrong-order / extra / duplicated operations and timing deviations.
+missing / wrong-order / extra / duplicated operations, timing deviations, and
+a present/absent/uncertain checklist of sub-second auxiliary operations.
 
-Implements the pipeline described in `plan.md`:
+Implements the pipeline described in `plan.md`, extended per
+`proposal-vlm-alignment.md` (work-area ROI, VLM emission, aux checklist):
 
 ```
 expert video + expert JSON      worker video
         │                            │
         ▼                            ▼
+  work-area ROI (union of hand boxes; crop + upscale before detection)
+        │                            │
   per-frame signals (WiLoR hand keypoints, Farneback optical flow per hand,
                       DINOv2 embedding of the hands' crop)
         │                            │
@@ -18,9 +22,17 @@ expert video + expert JSON      worker video
       similarity matrix (keypoint DTW + flow DTW + duration prior +
                           per-frame nearest-neighbor over pose/flow + DINOv2 embedding)
                      ▼
-      Viterbi decoding constrained by expert scene order (with EXTRA states)
+      tier 1: VLM emission (change-point segments → ROI keyframes → OpenRouter
+              VLM classify vs the scene catalog; blended in at weight ~0.6;
+              cached; silently skipped when OPENROUTER_API_KEY is unset)
                      ▼
-      alignment report (JSON / CSV / HTML timeline / score-matrix heatmap)
+      Viterbi decoding constrained by expert scene order (with EXTRA states,
+              no-confident-match → UNMATCHED instead of forced matches)
+                     ▼
+      tier 2: aux-operation checklist (motion-spike frame clusters → VLM
+              yes/no + button/lever zone activity detector)
+                     ▼
+      alignment report v2 (JSON / CSV / HTML timeline / aux checklist)
 ```
 
 ## Setup
@@ -61,6 +73,32 @@ not committed to git).
 
 Or step by step: `extract-expert`, `extract-worker`, `match` (see `python -m src.main -h`).
 
+### VLM stages (OpenRouter)
+
+Set `OPENROUTER_API_KEY` to enable the tier-1 VLM emission and the tier-2 aux
+checklist; without it the pipeline runs on the pose/flow terms only (and the
+aux checklist falls back to the button/lever zone detector when a legacy
+`roi_auto.json` with named zones is present). Flags on `match` / `run-all`:
+`--no-vlm`, `--vlm-model` (default `google/gemini-2.5-flash`), `--vlm-weight`
+(default 0.6), `--refs-per-scene` (few-shot expert crops, default 1),
+`--vlm-cache-dir` (default `<out>/vlm_cache` — responses are cached by
+(video fingerprint, frames, prompt version, model), so re-runs are free).
+
+Scene descriptions used in the prompts live in
+`configs/scene_descriptions.json` (the proposal's one-time manual
+confirmation); the main/aux split for composite scenes can be overridden in
+`configs/aux_operations.json`.
+
+### Work-area ROI
+
+Extraction estimates a fixed work-area ROI per video (union of detected hand
+boxes over a sampling pass) and runs hand detection on the cropped + upscaled
+region, which recovers detections that fail at 480×368 native resolution.
+Control with `--roi auto|none|<path>` and `--roi-upscale-width` on the
+extract commands / `run-all`; `estimate-roi --video ... --out roi.json`
+computes one standalone. The ROI is saved to `<out>/work_area_roi.json` and
+reused for every frame sent to the VLM.
+
 ## Outputs
 
 ```
@@ -70,8 +108,12 @@ outputs/expert/embeddings.npy        per-frame DINOv2 embedding (hands' crop)
 outputs/expert/templates.json        per-scene templates
 outputs/expert/overlay.mp4           debug overlay video
 outputs/worker/...                   same for worker + candidate_windows.csv
+outputs/expert/work_area_roi.json    fixed work-area ROI used for crop+upscale
 outputs/reports/alignment_report.json / .csv
-outputs/reports/alignment_timeline.html   visual timeline + error table
+outputs/reports/alignment_timeline.html   visual timeline + error + aux tables
+outputs/reports/aux_checklist.csv    aux-operation present/absent/uncertain
+outputs/reports/vlm_segments.json    per-segment VLM scores + evidence
+outputs/reports/vlm_cache/           cached VLM responses (safe to keep)
 outputs/reports/score_matrix.npy / .png
 ```
 
@@ -93,6 +135,19 @@ outputs/reports/score_matrix.npy / .png
   `embeddings.npy` (older extraction runs).
 - **Timing thresholds** — `src/reporting/build_report.py` `TIMING`
   (TOO_FAST < 0.6, TOO_SLOW > 1.6).
+- **No-confident-match** — `src/reporting/build_report.py` `UNMATCHED_REL` /
+  `LOW_CONF_REL`: segment confidence (mean decoded emission probability) is
+  compared against the uniform level 1/n_scenes; segments below the
+  thresholds are reported UNMATCHED / LOW_CONFIDENCE instead of being forced
+  into a match, and UNMATCHED segments do not satisfy a scene (it surfaces
+  as MISSING). With pose/flow-only emissions (near-uniform, see the
+  proposal's diagnosis) most segments are honestly UNMATCHED — the VLM
+  emission is what lifts real matches above the thresholds.
+- **VLM emission/aux** — `src/vlm/emission.py` (`VLM_BLEND_WEIGHT`,
+  `KEYFRAMES_PER_SEGMENT`, `MAX_SEGMENTS`) and `src/vlm/aux_check.py`
+  (`MIN_VLM_CONFIDENCE`, `ZONE_ACTIVITY_THRESH`, spike-cluster sizes);
+  Viterbi penalties used with VLM emissions: `PENALTIES_VLM` in
+  `src/matching/viterbi_decoder.py`.
 - **Window sizes / stride** — `src/segmentation/candidate_windows.py`
   (0.3–2.0 s windows, 0.2 s stride, expressed in seconds so any fps works).
 

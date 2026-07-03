@@ -10,10 +10,13 @@ STATUS_COLORS = {
     "MATCHED": "#4caf50",
     "EXTRA": "#e53935",
     "LOW_CONFIDENCE": "#ff9800",
+    "UNMATCHED": "#795548",
     "MISSING": "#9e9e9e",
     "WRONG_ORDER": "#8e24aa",
     "UNKNOWN": "#607d8b",
 }
+
+AUX_VERDICT_COLORS = {"present": "#4caf50", "absent": "#e53935", "uncertain": "#ff9800"}
 
 
 def _hex_to_bgr(hex_color: str) -> tuple[int, int, int]:
@@ -287,6 +290,21 @@ def save_timeline_html(report: dict, scenes, out_dir: str | Path):
         f"<tr><td>{html.escape(e['type'])}</td><td>{html.escape(e['message'])}</td></tr>"
         for e in report["errors"]) or "<tr><td colspan=2>No errors detected</td></tr>"
 
+    aux = report.get("aux_checklist") or []
+    aux_rows = "".join(
+        f"<tr><td>E{a['scene_index']}</td><td>{html.escape(a['scene_label'])}</td>"
+        f"<td>{html.escape(a['operation'])}</td>"
+        f"<td style='color:{AUX_VERDICT_COLORS.get(a['verdict'], '#607d8b')};font-weight:600'>"
+        f"{html.escape(a['verdict'])}</td>"
+        f"<td>{a['confidence']:.2f}</td>"
+        f"<td>{('%.1f-%.1fs' % tuple(a['worker_time'])) if a.get('worker_time') else '—'}</td>"
+        f"<td>{html.escape(a.get('evidence') or '')}</td></tr>"
+        for a in aux)
+    aux_section = ("" if not aux else f"""
+<h2 style="font-size:16px">Aux-operation checklist</h2>
+<table><tr><th>Scene</th><th>Scene label</th><th>Aux operation</th><th>Verdict</th>
+<th>Conf</th><th>Worker time</th><th>Evidence</th></tr>{aux_rows}</table>""")
+
     legend = "".join(
         f'<span class="lg"><span class="sw" style="background:{c}"></span>{n.lower()}</span>'
         for n, c in {**STATUS_COLORS, "expert scene": "#2196f3"}.items())
@@ -313,7 +331,9 @@ table{{border-collapse:collapse;margin-top:16px}} td,th{{border:1px solid #ccc;p
 <span><b>Extra:</b> {summary['extra_count']}</span>
 <span><b>Wrong order:</b> {summary['wrong_order_count']}</span>
 <span><b>Duplicated:</b> {summary['duplicated_count']}</span>
+<span><b>Unmatched:</b> {summary.get('unmatched_count', 0)}</span>
 <span><b>Overall score:</b> {summary['overall_score']}</span>
+<span><b>Emission:</b> {html.escape(report.get('emission_source', 'pose_flow'))}</span>
 </div>
 <p>{legend}</p>
 <div class="grid">
@@ -323,6 +343,7 @@ table{{border-collapse:collapse;margin-top:16px}} td,th{{border:1px solid #ccc;p
 <p style="font-size:12px;color:#666">Hover segments for details. Numbers are expert scene indices; X = extra action.</p>
 <h2 style="font-size:16px">Errors</h2>
 <table><tr><th>Type</th><th>Detail</th></tr>{err_rows}</table>
+{aux_section}
 <h2 style="font-size:16px">Score matrix</h2>
 <img src="score_matrix.png" style="max-width:100%">
 </body></html>"""
