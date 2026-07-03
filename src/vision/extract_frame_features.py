@@ -11,7 +11,9 @@ Produces, per video:
   <out>/keypoints.jsonl        raw hand landmarks per frame
   <out>/embeddings.npy         per-frame DINOv2 embedding of the hands' crop
   <out>/work_area_roi.json     the ROI used (reused by the VLM stages)
-  <out>/overlay.mp4            debug overlay video
+  <out>/overlay.mp4            debug overlay video (hands/keypoints/ROI)
+  <out>/overlay_optical_flow.mp4  dense Farneback flow, HSV-encoded (hue=direction,
+                                   value=magnitude) -- only with flow_overlay=True
 """
 from __future__ import annotations
 
@@ -90,6 +92,17 @@ def _embed_crop_bbox(hand_info: dict, width: int, height: int,
     return x1, y1, x2, y2
 
 
+def _flow_to_bgr(flow: np.ndarray) -> np.ndarray:
+    """HSV color-wheel encoding of a dense flow field: hue = direction,
+    value = magnitude (normalized per-frame so slow segments are still visible)."""
+    mag, ang = cv2.cartToPolar(flow[..., 0], flow[..., 1])
+    hsv = np.zeros((*flow.shape[:2], 3), dtype=np.uint8)
+    hsv[..., 0] = ang * (180 / (2 * np.pi))
+    hsv[..., 1] = 255
+    hsv[..., 2] = cv2.normalize(mag, None, 0, 255, cv2.NORM_MINMAX)
+    return cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+
+
 def _flow_stats(flow: np.ndarray, bbox_px: tuple[int, int, int, int], scale: float) -> dict:
     x1, y1, x2, y2 = (int(v * scale) for v in bbox_px)
     patch = flow[y1:y2, x1:x2]
@@ -109,6 +122,7 @@ def extract_video_features(
     video_path: str | Path,
     out_dir: str | Path,
     overlay: bool = True,
+    flow_overlay: bool = False,
     max_frames: int | None = None,
     roi: str | dict | None = "auto",
     roi_upscale_width: int = DEFAULT_UPSCALE_WIDTH,
@@ -161,6 +175,16 @@ def extract_video_features(
         oh = int(height * ow / width)
         writer = cv2.VideoWriter(
             str(out_dir / "overlay.mp4"), cv2.VideoWriter_fourcc(*"mp4v"), fps, (ow, oh)
+        )
+
+    flow_writer = None
+    flow_writer_size = None
+    if flow_overlay:
+        fw = proc_w if proc_w <= 960 else 960
+        fh = int(proc_h * fw / proc_w)
+        flow_writer_size = (fw, fh)
+        flow_writer = cv2.VideoWriter(
+            str(out_dir / "overlay_optical_flow.mp4"), cv2.VideoWriter_fourcc(*"mp4v"), fps, (fw, fh)
         )
 
     rows: list[dict] = []
@@ -219,7 +243,14 @@ def extract_video_features(
             for side in ("left", "right"):
                 for k in ("mean_mag", "max_mag", "p90_mag", "mean_dx", "mean_dy"):
                     flow_feats[f"{side}_hand_flow_{k}"] = 0.0
+            flow = None
         prev_gray = small_gray
+
+        if flow_writer is not None:
+            flow_vis = _flow_to_bgr(flow) if flow is not None else np.zeros(
+                (flow_size[1], flow_size[0], 3), dtype=np.uint8)
+            flow_vis = cv2.resize(flow_vis, flow_writer_size)
+            flow_writer.write(flow_vis)
 
         # --- per-frame row ---
         row: dict = {"frame": fi, "time": fi / fps}
@@ -276,6 +307,8 @@ def extract_video_features(
     kp_file.close()
     if writer is not None:
         writer.release()
+    if flow_writer is not None:
+        flow_writer.release()
 
     df = pd.DataFrame(rows)
     df.attrs["fps"] = fps

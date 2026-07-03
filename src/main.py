@@ -18,9 +18,11 @@ from tqdm import tqdm
 from src.io.load_course_data import load_task_spec
 
 
-def cmd_extract(video: str, out: str, roi: str | None = "auto", roi_upscale_width: int = 960):
+def cmd_extract(video: str, out: str, roi: str | None = "auto", roi_upscale_width: int = 960,
+                flow_overlay: bool = False):
     from src.vision.extract_frame_features import extract_video_features
-    extract_video_features(video, out, roi=roi, roi_upscale_width=roi_upscale_width)
+    extract_video_features(video, out, roi=roi, roi_upscale_width=roi_upscale_width,
+                            flow_overlay=flow_overlay)
 
 
 def _load_video_roi(feature_dir: Path, meta: dict) -> dict:
@@ -305,6 +307,9 @@ def _add_roi_args(p):
                         "path to a work_area_roi.json / legacy roi_auto.json, or 'none'")
     p.add_argument("--roi-upscale-width", type=int, default=960,
                    help="upscale the ROI crop to this width before hand detection")
+    p.add_argument("--flow-overlay", action="store_true",
+                   help="write <out>/overlay_optical_flow.mp4, an HSV-encoded visualization "
+                        "of the dense Farneback flow field (hue=direction, value=magnitude)")
 
 
 def _add_vlm_args(p):
@@ -370,7 +375,7 @@ def main():
     args = ap.parse_args()
     if args.cmd in ("extract-expert", "extract-worker"):
         cmd_extract(args.video, args.out, roi=_roi_arg(args.roi),
-                    roi_upscale_width=args.roi_upscale_width)
+                    roi_upscale_width=args.roi_upscale_width, flow_overlay=args.flow_overlay)
     elif args.cmd == "estimate-roi":
         from src.vision.work_area_roi import estimate_roi_from_video, save_roi
         work_area = estimate_roi_from_video(args.video)
@@ -383,9 +388,9 @@ def main():
     elif args.cmd == "run-all":
         out = Path(args.out)
         cmd_extract(args.expert_video, str(out / "expert"), roi=_roi_arg(args.roi),
-                    roi_upscale_width=args.roi_upscale_width)
+                    roi_upscale_width=args.roi_upscale_width, flow_overlay=args.flow_overlay)
         cmd_extract(args.worker_video, str(out / "worker"), roi=_roi_arg(args.roi),
-                    roi_upscale_width=args.roi_upscale_width)
+                    roi_upscale_width=args.roi_upscale_width, flow_overlay=args.flow_overlay)
         cmd_match(str(out / "expert"), str(out / "worker"), args.course_json, str(out / "reports"),
                   debug=args.debug,
                   no_vlm=args.no_vlm, vlm_model=args.vlm_model, vlm_weight=args.vlm_weight,
