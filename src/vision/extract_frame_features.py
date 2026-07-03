@@ -66,21 +66,28 @@ def _embed_crop_bbox(hand_info: dict, width: int, height: int,
     """Padded pixel bbox around whichever hands are present, for the
     embedding crop. Coordinates are in the processing frame (the ROI crop
     when a mapper is given, else the full frame). Falls back to the whole
-    processing frame if neither hand is detected (still gives the embedding
-    model something to work with)."""
+    processing frame if neither hand is detected or the boxes degenerate
+    (e.g. a hand detected right at / outside the ROI edge clips to an empty
+    rectangle — an empty crop crashes the embedding processor)."""
     if mapper is not None:
+        pw, ph = mapper.out_w, mapper.out_h
         boxes = [mapper.full_norm_bbox_to_crop_px(hi["bbox"]) for hi in hand_info.values() if hi]
     else:
+        pw, ph = width, height
         boxes = [_bbox_to_pixels(hi["bbox"], width, height) for hi in hand_info.values() if hi]
+    boxes = [b for b in boxes if b[2] - b[0] >= 2 and b[3] - b[1] >= 2]
     if not boxes:
-        return 0, 0, width, height
+        return 0, 0, pw, ph
     x1 = min(b[0] for b in boxes)
     y1 = min(b[1] for b in boxes)
     x2 = max(b[2] for b in boxes)
     y2 = max(b[3] for b in boxes)
     pad_x, pad_y = int((x2 - x1) * EMBED_PAD_FRAC), int((y2 - y1) * EMBED_PAD_FRAC)
-    return (max(0, x1 - pad_x), max(0, y1 - pad_y),
-            min(width, x2 + pad_x), min(height, y2 + pad_y))
+    x1, y1 = max(0, x1 - pad_x), max(0, y1 - pad_y)
+    x2, y2 = min(pw, x2 + pad_x), min(ph, y2 + pad_y)
+    if x2 - x1 < 4 or y2 - y1 < 4:
+        return 0, 0, pw, ph
+    return x1, y1, x2, y2
 
 
 def _flow_stats(flow: np.ndarray, bbox_px: tuple[int, int, int, int], scale: float) -> dict:

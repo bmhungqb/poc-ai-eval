@@ -25,6 +25,10 @@ class DinoEmbedder:
 
     @torch.no_grad()
     def __call__(self, crop_bgr: np.ndarray) -> np.ndarray:
+        if crop_bgr.shape[0] < 2 or crop_bgr.shape[1] < 2:
+            # empty/degenerate crop would crash the processor's resize;
+            # a zero vector is maximally distant from every real embedding
+            return np.zeros(self.dim, dtype=np.float32)
         rgb = np.ascontiguousarray(crop_bgr[:, :, ::-1])
         inputs = self.processor(images=rgb, return_tensors="pt").to(self.device)
         out = self.model(**inputs)
