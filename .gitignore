@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+
+# Pipeline outputs (regenerable)
+outputs/
+
+# Large video files
+data/*.mp4
+*.mp4
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

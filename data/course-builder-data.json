@@ -1,0 +1,335 @@
+{
+  "input_version": {
+    "id": "06a307fb-c417-75a8-8000-58c9db87e105",
+    "version": 1,
+    "task_name": "Diễu 7 li nẹp đỡ",
+    "operations": [
+      {
+        "name": "Lấy nẹp đỡ đặt vào chân vịt",
+        "frequency": 1.0,
+        "tmu_bundle": 0.0,
+        "tmu_manual": 56.0,
+        "tmu_machine": 0.0
+      },
+      {
+        "name": "Lại mũi bằng nút nhấn",
+        "frequency": 2.0,
+        "tmu_bundle": 0.0,
+        "tmu_manual": 0.0,
+        "tmu_machine": 48.0
+      },
+      {
+        "name": "Diễu đầu nẹp đỡ",
+        "frequency": 1.0,
+        "tmu_bundle": 0.0,
+        "tmu_manual": 0.0,
+        "tmu_machine": 46.5
+      },
+      {
+        "name": "Lại mũi bằng cần gạt",
+        "frequency": 1.0,
+        "tmu_bundle": 0.0,
+        "tmu_manual": 0.0,
+        "tmu_machine": 34.0
+      },
+      {
+        "name": "Xoay quay kim (xoay góc)",
+        "frequency": 1.0,
+        "tmu_bundle": 0.0,
+        "tmu_manual": 33.0,
+        "tmu_machine": 0.0
+      },
+      {
+        "name": "Đẩy cữ vào nẹp đỡ",
+        "frequency": 1.0,
+        "tmu_bundle": 0.0,
+        "tmu_manual": 24.0,
+        "tmu_machine": 0.0
+      },
+      {
+        "name": "Điều chỉnh mép",
+        "frequency": 10.0,
+        "tmu_bundle": 0.0,
+        "tmu_manual": 430.0,
+        "tmu_machine": 0.0
+      },
+      {
+        "name": "Diễu cạnh dài",
+        "frequency": 5.0,
+        "tmu_bundle": 0.0,
+        "tmu_manual": 0.0,
+        "tmu_machine": 349.0
+      },
+      {
+        "name": "Đẩy cữ ra khỏi nẹp đỡ",
+        "frequency": 1.0,
+        "tmu_bundle": 0.0,
+        "tmu_manual": 24.0,
+        "tmu_machine": 0.0
+      },
+      {
+        "name": "Diễu góc tròn",
+        "frequency": 3.0,
+        "tmu_bundle": 0.0,
+        "tmu_manual": 0.0,
+        "tmu_machine": 81.9
+      },
+      {
+        "name": "Diễu đầu nẹp đỡ còn lại",
+        "frequency": 1.0,
+        "tmu_bundle": 0.0,
+        "tmu_manual": 0.0,
+        "tmu_machine": 46.5
+      },
+      {
+        "name": "Cắt chỉ",
+        "frequency": 1.0,
+        "tmu_bundle": 0.0,
+        "tmu_manual": 9.0,
+        "tmu_machine": 0.0
+      },
+      {
+        "name": "Đưa ra sau may",
+        "frequency": 1.0,
+        "tmu_bundle": 0.0,
+        "tmu_manual": 24.0,
+        "tmu_machine": 0.0
+      },
+      {
+        "name": "Kiểm tra",
+        "frequency": 1.0,
+        "tmu_bundle": 0.0,
+        "tmu_manual": 7.0,
+        "tmu_machine": 0.0
+      },
+      {
+        "name": "Đưa chi tiết ra ngoài",
+        "frequency": 1.0,
+        "tmu_bundle": 0.0,
+        "tmu_manual": 23.0,
+        "tmu_machine": 0.0
+      }
+    ],
+    "videos_export": [
+      {
+        "filename": "expert.mp4",
+        "file_path": "poc-ai-eval/data/expert.mp4",
+        "video_index": 1,
+        "created_at": "2026-07-02T15:01:53.801593",
+        "scenes": [
+          {
+            "id": "06a47489-6456-70f6-8000-32f695d4d4c9",
+            "scene_index": 0,
+            "timestamp_start": 0,
+            "timestamp_end": 4,
+            "caption": "",
+            "note": "",
+            "operations": [
+              "Lấy nẹp đỡ đặt vào chân vịt"
+            ],
+            "created_at": "2026-07-03T05:28:54.272014"
+          },
+          {
+            "id": "06a47489-645a-7f4d-8000-8a57f2bbf4c7",
+            "scene_index": 1,
+            "timestamp_start": 4,
+            "timestamp_end": 5,
+            "caption": "Cảnh 2",
+            "note": "",
+            "operations": [
+              "Lại mũi bằng nút nhấn"
+            ],
+            "created_at": "2026-07-03T05:28:54.272263"
+          },
+          {
+            "id": "06a47489-645b-75a0-8000-328293f78668",
+            "scene_index": 2,
+            "timestamp_start": 5,
+            "timestamp_end": 7.5,
+            "caption": "",
+            "note": "",
+            "operations": [
+              "Diễu đầu nẹp đỡ",
+              "Điều chỉnh mép"
+            ],
+            "created_at": "2026-07-03T05:28:54.272327"
+          },
+          {
+            "id": "06a47489-645b-791d-8000-b6053ffc16b7",
+            "scene_index": 3,
+            "timestamp_start": 7.5,
+            "timestamp_end": 9.5,
+            "caption": "Cảnh 4",
+            "note": "",
+            "operations": [
+              "Lại mũi bằng cần gạt"
+            ],
+            "created_at": "2026-07-03T05:28:54.272378"
+          },
+          {
+            "id": "06a47489-645b-7c62-8000-86c510f4f88c",
+            "scene_index": 4,
+            "timestamp_start": 9.5,
+            "timestamp_end": 11.5,
+            "caption": "Cảnh 5",
+            "note": "",
+            "operations": [
+              "Xoay quay kim (xoay góc)"
+            ],
+            "created_at": "2026-07-03T05:28:54.272426"
+          },
+          {
+            "id": "06a47489-645c-7017-8000-cf58986d0dd4",
+            "scene_index": 5,
+            "timestamp_start": 11.5,
+            "timestamp_end": 13.5,
+            "caption": "Cảnh 6",
+            "note": "",
+            "operations": [
+              "Đẩy cữ vào nẹp đỡ"
+            ],
+            "created_at": "2026-07-03T05:28:54.272483"
+          },
+          {
+            "id": "06a47489-645c-7349-8000-29b6c2137966",
+            "scene_index": 6,
+            "timestamp_start": 13.5,
+            "timestamp_end": 19.400000000000002,
+            "caption": "Cảnh 7",
+            "note": "",
+            "operations": [
+              "Điều chỉnh mép",
+              "Diễu cạnh dài"
+            ],
+            "created_at": "2026-07-03T05:28:54.27253"
+          },
+          {
+            "id": "06a47489-645c-763f-8000-ef8d0c31a2c1",
+            "scene_index": 7,
+            "timestamp_start": 19.400000000000002,
+            "timestamp_end": 24.400000000000002,
+            "caption": "Cảnh 8",
+            "note": "",
+            "operations": [
+              "Điều chỉnh mép",
+              "Diễu cạnh dài"
+            ],
+            "created_at": "2026-07-03T05:28:54.272578"
+          },
+          {
+            "id": "06a47489-645c-7957-8000-10327b45e4fc",
+            "scene_index": 8,
+            "timestamp_start": 24.400000000000002,
+            "timestamp_end": 29.400000000000002,
+            "caption": "Cảnh 9",
+            "note": "",
+            "operations": [
+              "Điều chỉnh mép",
+              "Diễu cạnh dài"
+            ],
+            "created_at": "2026-07-03T05:28:54.272623"
+          },
+          {
+            "id": "06a47489-645c-7c53-8000-f4c1e852784d",
+            "scene_index": 9,
+            "timestamp_start": 29.400000000000002,
+            "timestamp_end": 33.7,
+            "caption": "Cảnh 10",
+            "note": "",
+            "operations": [
+              "Điều chỉnh mép",
+              "Diễu cạnh dài"
+            ],
+            "created_at": "2026-07-03T05:28:54.272669"
+          },
+          {
+            "id": "06a47489-645c-7f55-8000-3553a9896b00",
+            "scene_index": 10,
+            "timestamp_start": 33.7,
+            "timestamp_end": 37.5,
+            "caption": "Cảnh 11",
+            "note": "",
+            "operations": [],
+            "created_at": "2026-07-03T05:28:54.272713"
+          },
+          {
+            "id": "06a47489-645d-7250-8000-8cc116669aaf",
+            "scene_index": 11,
+            "timestamp_start": 37.5,
+            "timestamp_end": 38.7,
+            "caption": "Cảnh 12",
+            "note": "",
+            "operations": [
+              "Đẩy cữ ra khỏi nẹp đỡ"
+            ],
+            "created_at": "2026-07-03T05:28:54.272759"
+          },
+          {
+            "id": "06a47489-645d-7533-8000-9ef7f96a283c",
+            "scene_index": 12,
+            "timestamp_start": 38.7,
+            "timestamp_end": 48.5,
+            "caption": "Cảnh 13",
+            "note": "",
+            "operations": [
+              "Diễu góc tròn",
+              "Điều chỉnh mép"
+            ],
+            "created_at": "2026-07-03T05:28:54.272803"
+          },
+          {
+            "id": "06a47489-645d-7a6d-8000-e0a9f60cdc99",
+            "scene_index": 13,
+            "timestamp_start": 48.5,
+            "timestamp_end": 50,
+            "caption": "Cảnh 14",
+            "note": "",
+            "operations": [
+              "Điều chỉnh mép",
+              "Diễu đầu nẹp đỡ còn lại"
+            ],
+            "created_at": "2026-07-03T05:28:54.272885"
+          },
+          {
+            "id": "06a47489-645d-7d79-8000-b49ef87265a9",
+            "scene_index": 14,
+            "timestamp_start": 50,
+            "timestamp_end": 51.400000000000006,
+            "caption": "Cảnh 16",
+            "note": "",
+            "operations": [
+              "Cắt chỉ",
+              "Đưa ra sau may"
+            ],
+            "created_at": "2026-07-03T05:28:54.272929"
+          },
+          {
+            "id": "06a47489-645e-7068-8000-0d3911c18231",
+            "scene_index": 15,
+            "timestamp_start": 51.400000000000006,
+            "timestamp_end": 52.800000000000004,
+            "caption": "Cảnh 16",
+            "note": "",
+            "operations": [
+              "Kiểm tra"
+            ],
+            "created_at": "2026-07-03T05:28:54.272974"
+          },
+          {
+            "id": "06a47489-645e-7344-8000-97702fa45ac3",
+            "scene_index": 16,
+            "timestamp_start": 52.800000000000004,
+            "timestamp_end": 54.624,
+            "caption": "Cảnh 17",
+            "note": "",
+            "operations": [
+              "Đưa chi tiết ra ngoài"
+            ],
+            "created_at": "2026-07-03T05:28:54.273017"
+          }
+        ]
+      }
+    ],
+    "video_worker": "poc-ai-eval/data/worker.mp4"
+  }
+}
