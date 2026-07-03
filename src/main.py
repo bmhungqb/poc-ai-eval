@@ -28,7 +28,8 @@ def cmd_match(expert_dir: str, worker_dir: str, course_json: str, out: str, debu
     from src.matching.similarity import build_templates, prepare_features, window_scores
     from src.reporting.build_report import build_report, detect_errors, format_report_text
     from src.reporting.visualize_alignment import (
-        save_debug_path, save_debug_signal, save_score_matrix, save_timeline_html)
+        build_frame_labels, save_debug_path, save_debug_signal, save_score_matrix,
+        save_timeline_html, save_worker_frame_labels)
     from src.segmentation.candidate_windows import (
         STRIDE_S, WINDOW_SIZES_S, all_candidates, grid_steps)
 
@@ -190,6 +191,10 @@ def cmd_match(expert_dir: str, worker_dir: str, course_json: str, out: str, debu
     report = build_report(spec, segments, errors,
                           expert_meta.get("video", ""), worker_meta.get("video", ""), out_dir)
     save_timeline_html(report, scenes, out_dir)
+
+    # per-frame "what operation is the worker doing right now" labels + annotated video
+    labels_df = build_frame_labels(worker_df, report)
+    save_worker_frame_labels(labels_df, worker_meta.get("video", ""), out_dir, log=print)
 
     print("\n" + format_report_text(report))
     print(f"\nReports written to {out_dir}")

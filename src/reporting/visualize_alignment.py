@@ -12,7 +12,97 @@ STATUS_COLORS = {
     "LOW_CONFIDENCE": "#ff9800",
     "MISSING": "#9e9e9e",
     "WRONG_ORDER": "#8e24aa",
+    "UNKNOWN": "#607d8b",
 }
+
+
+def _hex_to_bgr(hex_color: str) -> tuple[int, int, int]:
+    h = hex_color.lstrip("#")
+    r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+    return (b, g, r)
+
+
+def build_frame_labels(worker_df, report: dict):
+    """One row per worker frame: which decoded segment (if any) covers its
+    timestamp, carrying the segment's matched scene/operations/status/
+    confidence. Frames outside every segment's [start, end) (small gaps at
+    segment boundaries) get status UNKNOWN. `report["segments"]` is already
+    sorted by worker_start (segments are built by walking the path in
+    order), so a single searchsorted over segment starts locates the
+    covering segment per frame in O(log n) instead of a per-frame scan."""
+    import pandas as pd
+
+    segments = report["segments"]
+    times = worker_df["time"].to_numpy()
+    frames = worker_df["frame"].to_numpy() if "frame" in worker_df.columns else np.arange(len(worker_df))
+
+    if not segments:
+        starts = ends = np.array([])
+    else:
+        starts = np.array([s["worker_start"] for s in segments])
+        ends = np.array([s["worker_end"] for s in segments])
+
+    rows = []
+    idxs = np.searchsorted(starts, times, side="right") - 1 if len(starts) else np.full(len(times), -1)
+    for i, t in enumerate(times):
+        si = int(idxs[i])
+        seg = segments[si] if 0 <= si < len(segments) and starts[si] <= t < ends[si] + 1e-6 else None
+        rows.append({
+            "frame": int(frames[i]),
+            "time": round(float(t), 3),
+            "expert_scene_index": seg["matched_expert_scene_index"] if seg else None,
+            "operations": " + ".join(seg["operations"]) if seg else "",
+            "status": seg["status"] if seg else "UNKNOWN",
+            "timing_status": seg["timing_status"] if seg else "",
+            "confidence": seg["confidence"] if seg else 0.0,
+        })
+    return pd.DataFrame(rows)
+
+
+def save_worker_frame_labels(labels_df, worker_video_path: str, out_dir: str | Path,
+                             video_name: str = "worker_labeled.mp4", log=lambda *_a: None):
+    """Write per-frame labels to CSV, plus (if the source video is
+    reachable) an annotated copy of the worker video with the current
+    scene/operation/status burned into each frame."""
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    labels_df.to_csv(out_dir / "worker_frame_labels.csv", index=False)
+
+    if not worker_video_path or not Path(worker_video_path).exists():
+        log(f"skipping labeled video -- worker video not found ({worker_video_path!r})")
+        return
+
+    import cv2
+
+    cap = cv2.VideoCapture(str(worker_video_path))
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    writer = cv2.VideoWriter(str(out_dir / video_name), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height))
+
+    labels = labels_df.to_dict("records")
+    n = len(labels)
+    i = 0
+    while True:
+        ok, frame = cap.read()
+        if not ok or i >= n:
+            break
+        row = labels[i]
+        color = _hex_to_bgr(STATUS_COLORS.get(row["status"], STATUS_COLORS["UNKNOWN"]))
+        scene = f"E{row['expert_scene_index']}" if row["expert_scene_index"] is not None else "-"
+        line1 = f"t={row['time']:.2f}s  scene={scene}  {row['status']}"
+        line2 = row["operations"] or "(none)"
+        line3 = f"conf={row['confidence']:.2f} {row['timing_status']}".strip()
+        cv2.rectangle(frame, (0, 0), (width, 70), (0, 0, 0), -1)
+        cv2.putText(frame, line1, (8, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
+        cv2.putText(frame, line2, (8, 42), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
+        cv2.putText(frame, line3, (8, 62), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+        writer.write(frame)
+        i += 1
+
+    cap.release()
+    writer.release()
+    log(f"wrote labeled video ({i} frames) to {out_dir / video_name}")
 
 
 def save_score_matrix(score_matrix: np.ndarray, out_dir: str | Path, scene_labels: list[str],
