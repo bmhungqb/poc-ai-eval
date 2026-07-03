@@ -56,6 +56,9 @@ class OpenRouterClient:
     def __init__(self, model: str = DEFAULT_MODEL, api_key: str | None = None,
                  timeout: float = 180.0, max_retries: int = 3,
                  temperature: float = 0.0):
+        if api_key is None and "OPENROUTER_API_KEY" not in os.environ:
+            from src.io.env import load_dotenv
+            load_dotenv()  # also honor ./.env when used programmatically
         self.model = model
         self.api_key = api_key or os.environ.get("OPENROUTER_API_KEY", "")
         self.timeout = timeout

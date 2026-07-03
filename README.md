@@ -76,7 +76,9 @@ Or step by step: `extract-expert`, `extract-worker`, `match` (see `python -m src
 ### VLM stages (OpenRouter)
 
 Set `OPENROUTER_API_KEY` to enable the tier-1 VLM emission and the tier-2 aux
-checklist; without it the pipeline runs on the pose/flow terms only (and the
+checklist — either in the shell, or in a `.env` file in the project root
+(`cp .env.example .env` and fill in the key; git-ignored, shell env wins).
+Without it the pipeline runs on the pose/flow terms only (and the
 aux checklist falls back to the button/lever zone detector when a legacy
 `roi_auto.json` with named zones is present). Flags on `match` / `run-all`:
 `--no-vlm`, `--vlm-model` (default `google/gemini-2.5-flash`), `--vlm-weight`

@@ -326,6 +326,9 @@ def _roi_arg(value: str):
 
 
 def main():
+    from src.io.env import load_dotenv
+    load_dotenv()  # OPENROUTER_API_KEY etc. from ./.env (shell env wins)
+
     ap = argparse.ArgumentParser(prog="src.main")
     sub = ap.add_subparsers(dest="cmd", required=True)
 

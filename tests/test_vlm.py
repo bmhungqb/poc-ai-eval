@@ -29,6 +29,26 @@ from src.vlm.scene_prompts import (build_classify_messages, describe_op,
                                    load_op_descriptions, scene_catalog_text)
 
 
+class LoadDotenvTest(unittest.TestCase):
+    def test_parses_and_does_not_override_existing(self):
+        import os
+
+        from src.io.env import load_dotenv
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / ".env"
+            p.write_text('# comment\nexport FOO_TEST_KEY="abc"\nBAR_TEST_KEY=xyz\n\n')
+            os.environ.pop("FOO_TEST_KEY", None)
+            os.environ["BAR_TEST_KEY"] = "already-set"
+            try:
+                self.assertTrue(load_dotenv(p))
+                self.assertEqual(os.environ["FOO_TEST_KEY"], "abc")
+                self.assertEqual(os.environ["BAR_TEST_KEY"], "already-set")  # shell wins
+                self.assertFalse(load_dotenv(Path(d) / "missing.env"))
+            finally:
+                os.environ.pop("FOO_TEST_KEY", None)
+                os.environ.pop("BAR_TEST_KEY", None)
+
+
 class RoiFromHandBoxesTest(unittest.TestCase):
     def test_union_covers_boxes_with_padding(self):
         boxes = np.array([[0.3, 0.4, 0.5, 0.6], [0.35, 0.45, 0.6, 0.7]] * 50)
