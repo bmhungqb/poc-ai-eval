@@ -1,9 +1,9 @@
 """CLI for the sewing operation alignment POC.
 
-  python -m src.main extract-expert --course-json ... --video ... --roi ... --out outputs/expert
-  python -m src.main extract-worker --video ... --roi ... --out outputs/worker
+  python -m src.main extract-expert --course-json ... --video ... --out outputs/expert
+  python -m src.main extract-worker --video ... --out outputs/worker
   python -m src.main match --expert-dir ... --worker-dir ... --course-json ... --out outputs/reports
-  python -m src.main run-all --course-json ... --expert-video ... --worker-video ... --roi ... --out outputs
+  python -m src.main run-all --course-json ... --expert-video ... --worker-video ... --out outputs
 """
 from __future__ import annotations
 
@@ -16,21 +16,11 @@ import pandas as pd
 from tqdm import tqdm
 
 from src.io.load_course_data import load_task_spec
-from src.vision.roi import load_rois
 
 
-def cmd_extract(video: str, roi: str | None, out: str, role: str):
+def cmd_extract(video: str, out: str):
     from src.vision.extract_frame_features import extract_video_features
-    if roi:
-        rois = load_rois(roi, role)
-    else:
-        from src.vision.auto_roi import estimate_rois
-        print(f"Estimating ROIs automatically for {video} ...")
-        rois = estimate_rois(video)
-        Path(out).mkdir(parents=True, exist_ok=True)
-        (Path(out) / "roi_auto.json").write_text(json.dumps(rois, indent=2))
-        print(f"  needle={rois['needle']} (saved to {out}/roi_auto.json)")
-    extract_video_features(video, rois, out)
+    extract_video_features(video, out)
 
 
 def cmd_match(expert_dir: str, worker_dir: str, course_json: str, out: str):
@@ -65,8 +55,7 @@ def cmd_match(expert_dir: str, worker_dir: str, course_json: str, out: str):
     steps = grid_steps(len(worker_df), w_fps)
     n_steps, n_scenes = len(steps), len(scenes)
     emissions = np.zeros((n_steps, n_scenes))
-    motion = (worker_df["needle_flow_mean_mag"] + worker_df["fabric_area_flow_mean_mag"]
-              + worker_df["left_hand_flow_mean_mag"] + worker_df["right_hand_flow_mean_mag"]).to_numpy()
+    motion = (worker_df["left_hand_flow_mean_mag"] + worker_df["right_hand_flow_mean_mag"]).to_numpy()
     motion = np.clip(motion / max(np.percentile(motion, 90), 1e-6), 0, 1)
 
     for si, center in enumerate(tqdm(steps, desc="score steps")):
@@ -120,12 +109,10 @@ def main():
     p = sub.add_parser("extract-expert")
     p.add_argument("--course-json", required=True)
     p.add_argument("--video", required=True)
-    p.add_argument("--roi", default=None, help="optional ROI config; auto-estimated when omitted")
     p.add_argument("--out", required=True)
 
     p = sub.add_parser("extract-worker")
     p.add_argument("--video", required=True)
-    p.add_argument("--roi", default=None, help="optional ROI config; auto-estimated when omitted")
     p.add_argument("--out", required=True)
 
     p = sub.add_parser("match")
@@ -138,20 +125,19 @@ def main():
     p.add_argument("--course-json", required=True)
     p.add_argument("--expert-video", required=True)
     p.add_argument("--worker-video", required=True)
-    p.add_argument("--roi", default=None, help="optional ROI config; auto-estimated when omitted")
     p.add_argument("--out", required=True)
 
     args = ap.parse_args()
     if args.cmd == "extract-expert":
-        cmd_extract(args.video, args.roi, args.out, "expert")
+        cmd_extract(args.video, args.out)
     elif args.cmd == "extract-worker":
-        cmd_extract(args.video, args.roi, args.out, "worker")
+        cmd_extract(args.video, args.out)
     elif args.cmd == "match":
         cmd_match(args.expert_dir, args.worker_dir, args.course_json, args.out)
     elif args.cmd == "run-all":
         out = Path(args.out)
-        cmd_extract(args.expert_video, args.roi, str(out / "expert"), "expert")
-        cmd_extract(args.worker_video, args.roi, str(out / "worker"), "worker")
+        cmd_extract(args.expert_video, str(out / "expert"))
+        cmd_extract(args.worker_video, str(out / "worker"))
         cmd_match(str(out / "expert"), str(out / "worker"), args.course_json, str(out / "reports"))
 
 

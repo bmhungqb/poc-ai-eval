@@ -1,8 +1,8 @@
 """Feature preparation and similarity scoring between expert scene templates
 and worker candidate windows.
 
-score = 0.40*keypoint + 0.25*flow + 0.20*roi_event + 0.15*duration
-(image embedding term from the plan is deferred; its 0.05 weight is folded
+score = 0.50*keypoint + 0.30*flow + 0.20*duration
+(image embedding term from the plan is deferred; its weight is folded
 into duration for version 1)
 """
 from __future__ import annotations
@@ -10,24 +10,20 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from src.vision.extract_roi_events import EVENT_COLUMNS, compute_events
-
-WEIGHTS = {"keypoint": 0.40, "flow": 0.25, "event": 0.20, "duration": 0.15}
+WEIGHTS = {"keypoint": 0.50, "flow": 0.30, "duration": 0.20}
 
 KEYPOINT_CHANNELS = [
     "left_hand_cx", "left_hand_cy", "right_hand_cx", "right_hand_cy",
-    "left_hand_speed", "right_hand_speed",
-    "left_hand_dist_needle", "right_hand_dist_needle", "hands_distance",
+    "left_hand_speed", "right_hand_speed", "hands_distance",
 ]
 FLOW_CHANNELS = [
-    "needle_flow_mean_mag", "fabric_area_flow_mean_mag",
     "left_hand_flow_mean_mag", "right_hand_flow_mean_mag",
 ]
 DTW_SAMPLES = 24  # every sequence is resampled to this length before DTW
 
 
 def prepare_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Interpolate gaps, normalize signals to comparable ranges, attach events."""
+    """Interpolate gaps, normalize signals to comparable ranges."""
     out = df.copy()
     for col in KEYPOINT_CHANNELS:
         out[col] = out[col].interpolate(limit_direction="both").fillna(0.0)
@@ -35,9 +31,6 @@ def prepare_features(df: pd.DataFrame) -> pd.DataFrame:
     for col in ["left_hand_speed", "right_hand_speed"] + FLOW_CHANNELS:
         scale = np.percentile(out[col].abs(), 95)
         out[col] = out[col] / max(scale, 1e-6)
-    ev = compute_events(out)
-    for c in ev.columns:
-        out[c] = ev[c]
     return out
 
 
@@ -71,20 +64,6 @@ def dtw_score(a: np.ndarray, b: np.ndarray, temperature: float) -> float:
     return float(np.exp(-dtw_distance(a, b) / temperature))
 
 
-def event_similarity(ev_a: np.ndarray, ev_b: np.ndarray) -> float:
-    """Compare event activity profiles: per-channel active fraction + edge counts."""
-    def profile(ev: np.ndarray) -> np.ndarray:
-        frac = ev.mean(axis=0)
-        edges = np.abs(np.diff(ev, axis=0)).sum(axis=0) / max(len(ev), 1)
-        return np.concatenate([frac, edges])
-
-    pa, pb = profile(ev_a), profile(ev_b)
-    denom = np.linalg.norm(pa) * np.linalg.norm(pb)
-    if denom < 1e-9:
-        return 1.0 if np.allclose(pa, pb) else 0.0
-    return float(np.dot(pa, pb) / denom)
-
-
 def duration_score(worker_dur: float, expert_dur: float) -> float:
     ratio = max(worker_dur, 1e-3) / max(expert_dur, 1e-3)
     return float(np.exp(-abs(np.log(ratio))))
@@ -103,7 +82,6 @@ class SceneTemplate:
         self.duration = end - start
         self.kp = resample(seg[KEYPOINT_CHANNELS].to_numpy())
         self.flow = resample(seg[FLOW_CHANNELS].to_numpy())
-        self.events = seg[EVENT_COLUMNS].to_numpy()
 
     def to_json(self) -> dict:
         return {
@@ -111,7 +89,6 @@ class SceneTemplate:
             "operations": self.operations, "start": self.start, "end": self.end,
             "duration": self.duration,
             "keypoint_template": self.kp.tolist(), "flow_template": self.flow.tolist(),
-            "event_active_fraction": self.events.mean(axis=0).tolist(),
         }
 
 
@@ -128,11 +105,9 @@ def window_scores(win: pd.DataFrame, win_duration: float, tpl: SceneTemplate,
                   kp_temp: float = 1.0, flow_temp: float = 1.0) -> dict[str, float]:
     kp = resample(win[KEYPOINT_CHANNELS].to_numpy())
     fl = resample(win[FLOW_CHANNELS].to_numpy())
-    ev = win[EVENT_COLUMNS].to_numpy()
     s_kp = dtw_score(kp, tpl.kp, kp_temp)
     s_fl = dtw_score(fl, tpl.flow, flow_temp)
-    s_ev = event_similarity(ev, tpl.events)
     s_du = duration_score(win_duration, tpl.duration)
     total = (WEIGHTS["keypoint"] * s_kp + WEIGHTS["flow"] * s_fl
-             + WEIGHTS["event"] * s_ev + WEIGHTS["duration"] * s_du)
-    return {"total": total, "keypoint": s_kp, "flow": s_fl, "event": s_ev, "duration": s_du}
+             + WEIGHTS["duration"] * s_du)
+    return {"total": total, "keypoint": s_kp, "flow": s_fl, "duration": s_du}

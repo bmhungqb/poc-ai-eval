@@ -9,12 +9,12 @@ Implements the pipeline described in `plan.md`:
 expert video + expert JSON      worker video
         │                            │
         ▼                            ▼
-  per-frame signals (WiLoR hand keypoints, Farneback optical flow, ROI events)
+  per-frame signals (WiLoR hand keypoints, Farneback optical flow per hand)
         │                            │
   expert scene templates      candidate windows (multi-scale sliding + change-points)
         └────────────┬───────────────┘
                      ▼
-      similarity matrix (keypoint DTW + flow DTW + ROI-event overlap + duration prior)
+      similarity matrix (keypoint DTW + flow DTW + duration prior)
                      ▼
       Viterbi decoding constrained by expert scene order (with EXTRA states)
                      ▼
@@ -54,12 +54,6 @@ not committed to git).
 
 Or step by step: `extract-expert`, `extract-worker`, `match` (see `python -m src.main -h`).
 
-ROIs are estimated automatically per video (no manual input needed): the
-needle zone is localized from adjacent-frame motion × lamp brightness
-statistics, and the other ROIs are derived geometrically from it. The
-estimate used is saved to `outputs/<role>/roi_auto.json` and drawn in the
-overlay video. To override, pass `--roi configs/roi.json`.
-
 ## Outputs
 
 ```
@@ -75,10 +69,6 @@ outputs/reports/score_matrix.npy / .png
 
 ## Configuration
 
-- **ROIs** — auto-estimated by default (`src/vision/auto_roi.py`). Optional
-  manual override: `configs/roi.json`, normalized `[x1, y1, x2, y2]` (0–1),
-  separate `expert` / `worker` sections because camera framing differs
-  (use `outputs/*/overlay.mp4` to verify placement).
 - **Viterbi penalties** — `src/matching/viterbi_decoder.py` `PENALTIES`
   (skip / extra / backward…). The decoder is duration-aware: each scene expands
   into chained sub-states enforcing a minimum dwell (half the expert scene
@@ -86,7 +76,7 @@ outputs/reports/score_matrix.npy / .png
   column-z-scored + row-softmaxed (`sharpen_emissions`, temperature 4.0) to
   remove per-scene bias before decoding.
 - **Score weights** — `src/matching/similarity.py` `WEIGHTS`
-  (keypoint 0.40, flow 0.25, event 0.20, duration 0.15; image embedding
+  (keypoint 0.50, flow 0.30, duration 0.20; image embedding
   deferred per plan §11).
 - **Timing thresholds** — `src/reporting/build_report.py` `TIMING`
   (TOO_FAST < 0.6, TOO_SLOW > 1.6).
@@ -110,3 +100,8 @@ outputs/reports/score_matrix.npy / .png
 - The plan's MediaPipe Pose wrist fallback was dropped with the move off
   MediaPipe; short detection gaps are covered by interpolation in
   `prepare_features` instead.
+- ROI-based features (needle/fabric/button/lever zones, ROI events, manual
+  `configs/roi.json`) were removed entirely. Flow and motion signals are now
+  computed only around the detected hand bounding boxes; the similarity score
+  dropped the event term and redistributed its weight across keypoint/flow/
+  duration.
