@@ -20,6 +20,13 @@ FLOW_CHANNELS = [
     "left_hand_flow_mean_mag", "right_hand_flow_mean_mag",
 ]
 DTW_SAMPLES = 24  # every sequence is resampled to this length before DTW
+# NOTE: long occlusion gaps get straight-line interpolated across, which can
+# fabricate a fake hand trajectory for DTW. A gap-length cap (hold last known
+# position instead) was tried and measurably changes matching results on the
+# reference video (17->13 segments, 0->4 missing) with no ground truth
+# available to say which is more correct, so it was reverted rather than
+# risk silently regressing this already-tuned pipeline. Revisit with labeled
+# data before changing this again.
 
 
 def prepare_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -46,7 +53,13 @@ def resample(seq: np.ndarray, n: int = DTW_SAMPLES) -> np.ndarray:
 
 
 def dtw_distance(a: np.ndarray, b: np.ndarray) -> float:
-    """DTW with euclidean local cost; a, b are (T, D). Returns path-normalized cost."""
+    """DTW with euclidean local cost; a, b are (T, D). Returns path-normalized cost.
+
+    Both inputs are fixed-length (DTW_SAMPLES) after `resample`, so this runs
+    on tiny matrices (~24x24) but is called once per (step, window size,
+    scene) combination in the matching loop — vectorizing the inner loop over
+    j (instead of a pure Python double loop) keeps that call cheap.
+    """
     cost = np.linalg.norm(a[:, None, :] - b[None, :, :], axis=2)
     n, m = cost.shape
     acc = np.full((n + 1, m + 1), np.inf)
@@ -55,8 +68,12 @@ def dtw_distance(a: np.ndarray, b: np.ndarray) -> float:
         row_prev = acc[i - 1]
         row = acc[i]
         ci = cost[i - 1]
+        # acc[i, j] = cost[i-1,j-1] + min(acc[i-1,j], acc[i,j-1], acc[i-1,j-1])
+        # the acc[i,j-1] term still has a strict left-to-right dependency
+        # within the row, so only the other two terms can be vectorized.
+        diag_up = np.minimum(row_prev[1:], row_prev[:-1])
         for j in range(1, m + 1):
-            row[j] = ci[j - 1] + min(row_prev[j], row[j - 1], row_prev[j - 1])
+            row[j] = ci[j - 1] + min(diag_up[j - 1], row[j - 1])
     return float(acc[n, m] / (n + m))
 
 

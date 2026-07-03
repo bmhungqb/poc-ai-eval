@@ -61,7 +61,9 @@ def detect_errors(segments: list[DecodedSegment], scenes, task_spec) -> list[dic
         if len(runs) <= 1:
             continue
         ops = scenes[idx].operations
-        expected = max(1, round(min(task_spec.operation_frequency(op) for op in ops if op != "UNKNOWN") or 1))
+        known_ops = [op for op in ops if op != "UNKNOWN"]
+        freqs = [task_spec.operation_frequency(op) for op in known_ops]
+        expected = max(1, round(min(freqs))) if freqs else 1
         # frequency counts operation occurrences across ALL scenes; discount scenes sharing ops
         scenes_with_same_ops = sum(1 for sc in scenes if set(sc.operations) & set(ops) - {"UNKNOWN"})
         allowed = max(1, expected - max(0, scenes_with_same_ops - 1))
