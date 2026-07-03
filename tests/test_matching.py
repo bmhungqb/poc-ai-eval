@@ -7,9 +7,10 @@ from __future__ import annotations
 import unittest
 
 import numpy as np
+import pandas as pd
 
 from src.io.schemas import OperationSpec, SceneSpec, TaskSpec
-from src.matching.similarity import dtw_distance
+from src.matching.similarity import FEATURE_CHANNELS, SceneTemplate, dtw_distance, frame_nn_score
 from src.matching.viterbi_decoder import decode, sharpen_emissions
 from src.reporting.build_report import detect_errors
 from src.matching.viterbi_decoder import DecodedSegment
@@ -56,6 +57,43 @@ class ViterbiDecodeTest(unittest.TestCase):
         visited = [s for s in path if s != -1]
         self.assertEqual(visited, sorted(visited))
         self.assertEqual(set(visited), set(range(n_scenes)))
+
+
+def _scene_df(values: np.ndarray) -> pd.DataFrame:
+    return pd.DataFrame(values, columns=FEATURE_CHANNELS)
+
+
+class FrameNnScoreTest(unittest.TestCase):
+    def _template(self, values: np.ndarray) -> SceneTemplate:
+        return SceneTemplate(0, "s", ["op"], 0.0, 1.0, _scene_df(values))
+
+    def test_window_identical_to_scene_scores_near_one(self):
+        rng = np.random.RandomState(0)
+        vals = rng.randn(30, len(FEATURE_CHANNELS))
+        tpl = self._template(vals)
+        win = _scene_df(vals)
+        self.assertAlmostEqual(frame_nn_score(win, tpl), 1.0, places=6)
+
+    def test_window_far_from_scene_scores_near_zero(self):
+        rng = np.random.RandomState(0)
+        near = rng.randn(30, len(FEATURE_CHANNELS))
+        far = near + 100.0  # far away in every channel
+        tpl = self._template(near)
+        win = _scene_df(far)
+        self.assertLess(frame_nn_score(win, tpl), 1e-6)
+
+    def test_prefers_the_closer_of_two_scenes(self):
+        rng = np.random.RandomState(0)
+        cluster_a = rng.randn(20, len(FEATURE_CHANNELS))
+        cluster_b = cluster_a + 10.0
+        tpl_a = self._template(cluster_a)
+        tpl_b = self._template(cluster_b)
+        probe = _scene_df(cluster_a + 0.1)  # close to A, far from B
+        self.assertGreater(frame_nn_score(probe, tpl_a), frame_nn_score(probe, tpl_b))
+
+    def test_empty_window_scores_zero(self):
+        tpl = self._template(np.random.RandomState(0).randn(10, len(FEATURE_CHANNELS)))
+        self.assertEqual(frame_nn_score(_scene_df(np.empty((0, len(FEATURE_CHANNELS)))), tpl), 0.0)
 
 
 class DetectErrorsUnknownOpsTest(unittest.TestCase):

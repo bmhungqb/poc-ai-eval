@@ -1,16 +1,25 @@
 """Feature preparation and similarity scoring between expert scene templates
 and worker candidate windows.
 
-score = 0.50*keypoint + 0.30*flow + 0.20*duration
+score = 0.35*keypoint + 0.20*flow + 0.15*duration + 0.30*frame_nn
 (image embedding term from the plan is deferred; its weight is folded
 into duration for version 1)
+
+keypoint/flow are DTW distances between the window and the scene, both
+resampled to a fixed length (DTW_SAMPLES) — this assumes a roughly linear
+time correspondence between window and scene. frame_nn complements that: it
+queries each *raw* worker frame in the window against the scene's raw
+per-frame feature cloud (native resolution, no resampling), which is more
+directly what "does this worker frame look like something from this expert
+scene" means, and is not tied to a linear-warp assumption.
 """
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+from scipy.spatial import cKDTree
 
-WEIGHTS = {"keypoint": 0.50, "flow": 0.30, "duration": 0.20}
+WEIGHTS = {"keypoint": 0.35, "flow": 0.20, "duration": 0.15, "frame_nn": 0.30}
 
 KEYPOINT_CHANNELS = [
     "left_hand_cx", "left_hand_cy", "right_hand_cx", "right_hand_cy",
@@ -19,6 +28,7 @@ KEYPOINT_CHANNELS = [
 FLOW_CHANNELS = [
     "left_hand_flow_mean_mag", "right_hand_flow_mean_mag",
 ]
+FEATURE_CHANNELS = KEYPOINT_CHANNELS + FLOW_CHANNELS  # raw (unresampled) per-frame vector, for frame_nn
 DTW_SAMPLES = 24  # every sequence is resampled to this length before DTW
 # NOTE: long occlusion gaps get straight-line interpolated across, which can
 # fabricate a fake hand trajectory for DTW. A gap-length cap (hold last known
@@ -87,7 +97,9 @@ def duration_score(worker_dur: float, expert_dur: float) -> float:
 
 
 class SceneTemplate:
-    """Pre-resampled expert scene signals."""
+    """Pre-resampled expert scene signals, plus a KD-tree over the scene's
+    raw (unresampled) per-frame features for frame-level nearest-neighbor
+    queries (see frame_nn_score)."""
 
     def __init__(self, scene_index: int, label: str, operations: list[str],
                  start: float, end: float, seg: pd.DataFrame):
@@ -99,6 +111,8 @@ class SceneTemplate:
         self.duration = end - start
         self.kp = resample(seg[KEYPOINT_CHANNELS].to_numpy())
         self.flow = resample(seg[FLOW_CHANNELS].to_numpy())
+        raw = seg[FEATURE_CHANNELS].to_numpy()
+        self.kdtree = cKDTree(raw) if len(raw) > 0 else None
 
     def to_json(self) -> dict:
         return {
@@ -118,13 +132,32 @@ def build_templates(expert_df: pd.DataFrame, scenes, fps: float) -> list[SceneTe
     return templates
 
 
+def frame_nn_score(win: pd.DataFrame, tpl: SceneTemplate, temperature: float = 1.0) -> float:
+    """Chamfer-style per-frame nearest-neighbor score: for every raw worker
+    frame in the window, query its nearest raw expert frame within the scene
+    (native resolution -- each worker frame effectively "asks" the expert
+    scene "which of your frames do I look most like"), then average those
+    distances into a single score. Unlike the DTW score this needs no
+    resampling and makes no linear-time-correspondence assumption, so it can
+    catch a real match even when the window's internal pacing doesn't line
+    up with the scene's.
+    """
+    if tpl.kdtree is None or len(win) == 0:
+        return 0.0
+    feats = win[FEATURE_CHANNELS].to_numpy()
+    dists, _ = tpl.kdtree.query(feats)
+    return float(np.exp(-dists.mean() / temperature))
+
+
 def window_scores(win: pd.DataFrame, win_duration: float, tpl: SceneTemplate,
-                  kp_temp: float = 1.0, flow_temp: float = 1.0) -> dict[str, float]:
+                  kp_temp: float = 1.0, flow_temp: float = 1.0,
+                  nn_temp: float = 1.0) -> dict[str, float]:
     kp = resample(win[KEYPOINT_CHANNELS].to_numpy())
     fl = resample(win[FLOW_CHANNELS].to_numpy())
     s_kp = dtw_score(kp, tpl.kp, kp_temp)
     s_fl = dtw_score(fl, tpl.flow, flow_temp)
     s_du = duration_score(win_duration, tpl.duration)
+    s_nn = frame_nn_score(win, tpl, nn_temp)
     total = (WEIGHTS["keypoint"] * s_kp + WEIGHTS["flow"] * s_fl
-             + WEIGHTS["duration"] * s_du)
-    return {"total": total, "keypoint": s_kp, "flow": s_fl, "duration": s_du}
+             + WEIGHTS["duration"] * s_du + WEIGHTS["frame_nn"] * s_nn)
+    return {"total": total, "keypoint": s_kp, "flow": s_fl, "duration": s_du, "frame_nn": s_nn}
