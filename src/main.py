@@ -23,16 +23,25 @@ def cmd_extract(video: str, out: str):
     extract_video_features(video, out)
 
 
-def cmd_match(expert_dir: str, worker_dir: str, course_json: str, out: str):
+def cmd_match(expert_dir: str, worker_dir: str, course_json: str, out: str, debug: bool = False):
     from src.matching import viterbi_decoder
     from src.matching.similarity import build_templates, prepare_features, window_scores
     from src.reporting.build_report import build_report, detect_errors, format_report_text
-    from src.reporting.visualize_alignment import save_score_matrix, save_timeline_html
+    from src.reporting.visualize_alignment import (
+        save_debug_path, save_debug_signal, save_score_matrix, save_timeline_html)
     from src.segmentation.candidate_windows import (
         STRIDE_S, WINDOW_SIZES_S, all_candidates, grid_steps)
 
     out_dir = Path(out)
     out_dir.mkdir(parents=True, exist_ok=True)
+    debug_dir = out_dir / "debug"
+    if debug:
+        debug_dir.mkdir(parents=True, exist_ok=True)
+
+    def log(msg: str):
+        if debug:
+            print(f"[debug] {msg}")
+
     spec = load_task_spec(course_json)
     scenes = spec.expert_scenes
 
@@ -53,6 +62,7 @@ def cmd_match(expert_dir: str, worker_dir: str, course_json: str, out: str):
               "will be skipped (re-run extract-expert/extract-worker to enable it).")
 
     # expert templates
+    log(f"building {len(scenes)} expert scene templates")
     templates = build_templates(expert_df, scenes, e_fps, expert_embeddings)
     (Path(expert_dir) / "templates.json").write_text(
         json.dumps([t.to_json() for t in templates], ensure_ascii=False, indent=1), encoding="utf-8")
@@ -60,6 +70,7 @@ def cmd_match(expert_dir: str, worker_dir: str, course_json: str, out: str):
     # worker candidates
     candidates = all_candidates(worker_df, w_fps)
     candidates.to_csv(Path(worker_dir) / "candidate_windows.csv", index=False)
+    log(f"generated {len(candidates)} worker candidate windows")
 
     # emission matrix: per observation step, best window size per scene
     steps = grid_steps(len(worker_df), w_fps)
@@ -67,6 +78,12 @@ def cmd_match(expert_dir: str, worker_dir: str, course_json: str, out: str):
     emissions = np.zeros((n_steps, n_scenes))
     motion = (worker_df["left_hand_flow_mean_mag"] + worker_df["right_hand_flow_mean_mag"]).to_numpy()
     motion = np.clip(motion / max(np.percentile(motion, 90), 1e-6), 0, 1)
+    log(f"scoring {n_steps} observation steps x {n_scenes} scenes")
+
+    # per-component score matrices (keypoint/flow/duration/frame_nn/image_embed), for the
+    # winning window size at each (step, scene) -- debug-only, to inspect which term drives a match
+    component_names = ["keypoint", "flow", "duration", "frame_nn", "image_embed"]
+    score_components = {name: np.zeros((n_steps, n_scenes)) for name in component_names} if debug else {}
 
     for si, center in enumerate(tqdm(steps, desc="score steps")):
         for size_s in WINDOW_SIZES_S:
@@ -78,28 +95,97 @@ def cmd_match(expert_dir: str, worker_dir: str, course_json: str, out: str):
             win_embed = worker_embeddings[f0:f1] if worker_embeddings is not None else None
             dur = (f1 - f0) / w_fps
             for ti, tpl in enumerate(templates):
-                s = window_scores(win, dur, tpl, win_embed=win_embed)["total"]
+                scores = window_scores(win, dur, tpl, win_embed=win_embed)
+                s = scores["total"]
                 if s > emissions[si, ti]:
                     emissions[si, ti] = s
+                    for name, mat in score_components.items():
+                        if name in scores:
+                            mat[si, ti] = scores[name]
 
     save_score_matrix(emissions, out_dir, [sc.label for sc in scenes])
+    step_times = [c / w_fps for c in steps]
+    if debug:
+        save_score_matrix(emissions, debug_dir, [sc.label for sc in scenes],
+                          name="01_emissions_raw", title="Raw emissions (before sharpening)")
+        save_debug_signal(motion, debug_dir, "00_motion", "motion (0-1)")
+        for name, mat in score_components.items():
+            if mat.any():
+                save_score_matrix(mat, debug_dir, [sc.label for sc in scenes],
+                                  name=f"01a_score_{name}", title=f"'{name}' score component (winning window)")
 
     # sharpen emissions (remove per-scene bias, make steps discriminative)
     sharp = viterbi_decoder.sharpen_emissions(emissions)
     # EXTRA competes at ~uniform level, gated by motion in the worker video
     step_motion = np.array([motion[min(c, len(motion) - 1)] for c in steps])
     extra_emission = np.clip(step_motion * (1.2 / n_scenes) * (1.0 - sharp.max(axis=1)), 1e-3, 1.0)
+    if debug:
+        save_score_matrix(sharp, debug_dir, [sc.label for sc in scenes],
+                          name="02_emissions_sharp", title="Sharpened emissions (softmax'd)")
+        save_debug_signal(extra_emission, debug_dir, "03_extra_emission", "extra emission (0-1)",
+                          step_times=step_times)
 
     # minimum dwell per scene: half its expert duration, scaled by video-length ratio
     expert_total = max(sc.end for sc in scenes)
     worker_total = len(worker_df) / w_fps
     ratio = worker_total / expert_total
     dwell_steps = [max(1, int(round(0.5 * sc.duration / STRIDE_S * ratio))) for sc in scenes]
+    log(f"dwell_steps={dwell_steps} (worker/expert duration ratio={ratio:.3f})")
 
     # decode + report
     path = viterbi_decoder.decode(sharp, extra_emission, dwell_steps)
-    step_times = [c / w_fps for c in steps]
+    if debug:
+        save_debug_path(path, step_times, debug_dir, name="04_viterbi_path")
     segments = viterbi_decoder.merge_path(path, step_times, STRIDE_S, emissions, extra_emission, scenes)
+    log(f"decoded {len(segments)} segments")
+    if debug:
+        (debug_dir / "05_segments.json").write_text(
+            json.dumps([s.__dict__ for s in segments], ensure_ascii=False, indent=1, default=str),
+            encoding="utf-8")
+
+        # per-frame nearest-neighbor correspondence for each decoded (non-EXTRA) segment:
+        # which exact expert frame each worker frame matched against, for both the
+        # pose/flow and image-embedding queries
+        from src.matching.similarity import frame_correspondence
+        from src.reporting.visualize_alignment import save_frame_correspondence_plot, save_frame_overlays
+
+        corr_rows, overlay_pairs = [], []
+        for seg in segments:
+            if seg.matched_expert_scene_index is None:
+                continue
+            tpl = templates[seg.matched_expert_scene_index]
+            f0 = int(seg.start_time * w_fps)
+            f1 = min(len(worker_df), max(f0 + 1, int(seg.end_time * w_fps)))
+            win = worker_df.iloc[f0:f1]
+            win_embed = worker_embeddings[f0:f1] if worker_embeddings is not None else None
+            corr = frame_correspondence(win, tpl, w_fps, win_embed=win_embed)
+            corr["scene"] = seg.matched_expert_scene_index
+            corr["expert_time_nn"] = np.where(corr["expert_frame_nn"] >= 0,
+                                              corr["expert_frame_nn"] / e_fps, np.nan)
+            corr["expert_time_nn_embed"] = np.where(corr["expert_frame_nn_embed"] >= 0,
+                                                    corr["expert_frame_nn_embed"] / e_fps, np.nan)
+            corr_rows.append(corr)
+
+            valid = corr[corr["expert_frame_nn"] >= 0]
+            if len(valid):
+                sample = valid.iloc[np.linspace(0, len(valid) - 1, min(6, len(valid))).astype(int)]
+                for _, row in sample.iterrows():
+                    overlay_pairs.append({
+                        "worker_frame": int(row["worker_frame"]), "worker_time": float(row["worker_time"]),
+                        "expert_frame": int(row["expert_frame_nn"]), "expert_time": float(row["expert_time_nn"]),
+                        "scene": seg.matched_expert_scene_index,
+                    })
+
+        if corr_rows:
+            all_corr = pd.concat(corr_rows, ignore_index=True)
+            all_corr.to_csv(debug_dir / "06_frame_correspondence.csv", index=False)
+            save_frame_correspondence_plot(all_corr, debug_dir, name="06_frame_correspondence")
+            log(f"wrote per-frame correspondence for {len(all_corr)} worker frames")
+
+        if overlay_pairs:
+            save_frame_overlays(overlay_pairs, expert_meta.get("video", ""), worker_meta.get("video", ""),
+                                debug_dir / "frame_overlays", log=log)
+
     errors = detect_errors(segments, scenes, spec)
     report = build_report(spec, segments, errors,
                           expert_meta.get("video", ""), worker_meta.get("video", ""), out_dir)
@@ -107,6 +193,8 @@ def cmd_match(expert_dir: str, worker_dir: str, course_json: str, out: str):
 
     print("\n" + format_report_text(report))
     print(f"\nReports written to {out_dir}")
+    if debug:
+        print(f"Debug artifacts written to {debug_dir}")
 
 
 def main():
@@ -127,12 +215,16 @@ def main():
     p.add_argument("--worker-dir", required=True)
     p.add_argument("--course-json", required=True)
     p.add_argument("--out", required=True)
+    p.add_argument("--debug", action="store_true",
+                   help="save intermediate per-phase artifacts/visualizations to <out>/debug/")
 
     p = sub.add_parser("run-all")
     p.add_argument("--course-json", required=True)
     p.add_argument("--expert-video", required=True)
     p.add_argument("--worker-video", required=True)
     p.add_argument("--out", required=True)
+    p.add_argument("--debug", action="store_true",
+                   help="save intermediate per-phase artifacts/visualizations to <out>/reports/debug/")
 
     args = ap.parse_args()
     if args.cmd == "extract-expert":
@@ -140,12 +232,13 @@ def main():
     elif args.cmd == "extract-worker":
         cmd_extract(args.video, args.out)
     elif args.cmd == "match":
-        cmd_match(args.expert_dir, args.worker_dir, args.course_json, args.out)
+        cmd_match(args.expert_dir, args.worker_dir, args.course_json, args.out, debug=args.debug)
     elif args.cmd == "run-all":
         out = Path(args.out)
         cmd_extract(args.expert_video, str(out / "expert"))
         cmd_extract(args.worker_video, str(out / "worker"))
-        cmd_match(str(out / "expert"), str(out / "worker"), args.course_json, str(out / "reports"))
+        cmd_match(str(out / "expert"), str(out / "worker"), args.course_json, str(out / "reports"),
+                  debug=args.debug)
 
 
 if __name__ == "__main__":

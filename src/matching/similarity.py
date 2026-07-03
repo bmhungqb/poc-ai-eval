@@ -106,13 +106,16 @@ class SceneTemplate:
 
     def __init__(self, scene_index: int, label: str, operations: list[str],
                  start: float, end: float, seg: pd.DataFrame,
-                 embed_seg: np.ndarray | None = None):
+                 embed_seg: np.ndarray | None = None, frame_start: int = 0):
         self.scene_index = scene_index
         self.label = label
         self.operations = operations
         self.start = start
         self.end = end
         self.duration = end - start
+        self.frame_start = frame_start  # absolute expert frame index of seg.iloc[0] --
+                                        # lets a KD-tree row index be mapped back to an
+                                        # absolute expert frame number for debug visualization
         self.kp = resample(seg[KEYPOINT_CHANNELS].to_numpy())
         self.flow = resample(seg[FLOW_CHANNELS].to_numpy())
         raw = seg[FEATURE_CHANNELS].to_numpy()
@@ -137,7 +140,7 @@ def build_templates(expert_df: pd.DataFrame, scenes, fps: float,
         seg = expert_df.iloc[f0:f1]
         embed_seg = expert_embeddings[f0:f1] if expert_embeddings is not None else None
         templates.append(SceneTemplate(sc.scene_index, sc.label, sc.operations, sc.start, sc.end,
-                                       seg, embed_seg))
+                                       seg, embed_seg, frame_start=f0))
     return templates
 
 
@@ -175,6 +178,43 @@ def embed_nn_score(win_embed: np.ndarray | None, tpl: SceneTemplate, temperature
     if win_embed is None or len(win_embed) == 0:
         return None
     return _chamfer_score(win_embed, tpl.embed_kdtree, temperature)
+
+
+def frame_correspondence(win: pd.DataFrame, tpl: SceneTemplate, worker_fps: float,
+                         win_embed: np.ndarray | None = None) -> pd.DataFrame:
+    """Per-worker-frame nearest-neighbor query against the assigned scene's
+    KD-trees -- debug-only detail that window_scores discards (it only keeps
+    the mean distance). One row per frame in `win`, with the matched
+    absolute expert frame index/time for both the pose/flow (frame_nn) and
+    image-embedding (image_embed) queries, so a debug caller can see exactly
+    which expert frame each worker frame was compared against."""
+    worker_frames = win["frame"].to_numpy() if "frame" in win.columns else np.arange(len(win))
+    worker_times = worker_frames / worker_fps
+
+    n = len(win)
+    nn_frame = np.full(n, -1, dtype=int)
+    nn_dist = np.full(n, np.nan)
+    if tpl.kdtree is not None and n > 0:
+        raw = win[FEATURE_CHANNELS].to_numpy()
+        dists, idx = tpl.kdtree.query(raw)
+        nn_frame = tpl.frame_start + idx
+        nn_dist = dists
+
+    embed_nn_frame = np.full(n, -1, dtype=int)
+    embed_nn_dist = np.full(n, np.nan)
+    if tpl.embed_kdtree is not None and win_embed is not None and len(win_embed) == n and n > 0:
+        dists, idx = tpl.embed_kdtree.query(win_embed)
+        embed_nn_frame = tpl.frame_start + idx
+        embed_nn_dist = dists
+
+    return pd.DataFrame({
+        "worker_frame": worker_frames,
+        "worker_time": worker_times,
+        "expert_frame_nn": nn_frame,
+        "expert_dist_nn": nn_dist,
+        "expert_frame_nn_embed": embed_nn_frame,
+        "expert_dist_nn_embed": embed_nn_dist,
+    })
 
 
 def window_scores(win: pd.DataFrame, win_duration: float, tpl: SceneTemplate,

@@ -15,13 +15,14 @@ STATUS_COLORS = {
 }
 
 
-def save_score_matrix(score_matrix: np.ndarray, out_dir: str | Path, scene_labels: list[str]):
+def save_score_matrix(score_matrix: np.ndarray, out_dir: str | Path, scene_labels: list[str],
+                      name: str = "score_matrix", title: str = "Worker steps vs expert scenes"):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     out_dir = Path(out_dir)
-    np.save(out_dir / "score_matrix.npy", score_matrix)
+    np.save(out_dir / f"{name}.npy", score_matrix)
     fig, ax = plt.subplots(figsize=(10, max(6, score_matrix.shape[0] / 40)))
     im = ax.imshow(score_matrix, aspect="auto", cmap="viridis", interpolation="nearest")
     ax.set_xlabel("expert scene index")
@@ -29,9 +30,119 @@ def save_score_matrix(score_matrix: np.ndarray, out_dir: str | Path, scene_label
     ax.set_xticks(range(len(scene_labels)))
     ax.set_xticklabels([str(i) for i in range(len(scene_labels))])
     fig.colorbar(im, label="similarity")
-    ax.set_title("Worker steps vs expert scenes")
+    ax.set_title(title)
     fig.tight_layout()
-    fig.savefig(out_dir / "score_matrix.png", dpi=120)
+    fig.savefig(out_dir / f"{name}.png", dpi=120)
+    plt.close(fig)
+
+
+def save_debug_signal(values: np.ndarray, out_dir: str | Path, name: str, ylabel: str,
+                      step_times: list[float] | None = None):
+    """Save a 1-D per-step signal (e.g. extra_emission, motion) as .npy + line plot."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    out_dir = Path(out_dir)
+    np.save(out_dir / f"{name}.npy", values)
+    x = step_times if step_times is not None else range(len(values))
+    fig, ax = plt.subplots(figsize=(10, 3))
+    ax.plot(x, values, linewidth=1)
+    ax.set_xlabel("time (s)" if step_times is not None else "worker observation step")
+    ax.set_ylabel(ylabel)
+    ax.set_title(name)
+    fig.tight_layout()
+    fig.savefig(out_dir / f"{name}.png", dpi=120)
+    plt.close(fig)
+
+
+def save_frame_correspondence_plot(df, out_dir: str | Path, name: str = "frame_correspondence"):
+    """Scatter of worker time vs. the nearest-neighbor-matched expert frame's
+    time, one point per worker frame, colored by assigned scene. `df` has
+    columns worker_time, expert_time_nn, scene (see
+    src.matching.similarity.frame_correspondence)."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    out_dir = Path(out_dir)
+    fig, ax = plt.subplots(figsize=(9, 6))
+    scenes = sorted(df["scene"].unique())
+    cmap = plt.get_cmap("tab20")
+    for i, sc in enumerate(scenes):
+        sub = df[df["scene"] == sc]
+        ax.scatter(sub["worker_time"], sub["expert_time_nn"], s=6, color=cmap(i % 20), label=f"E{sc}")
+    ax.set_xlabel("worker time (s)")
+    ax.set_ylabel("nearest-neighbor-matched expert frame time (s)")
+    ax.set_title("Per-frame correspondence (pose/flow nearest-neighbor query)")
+    ax.legend(fontsize=7, ncol=2, markerscale=2, loc="upper left")
+    fig.tight_layout()
+    fig.savefig(out_dir / f"{name}.png", dpi=120)
+    plt.close(fig)
+
+
+def save_frame_overlays(pairs: list[dict], expert_video_path: str, worker_video_path: str,
+                        out_dir: str | Path, log=lambda *_a: None):
+    """For each {worker_frame, worker_time, expert_frame, expert_time, scene}
+    pair, read both raw frames and write a side-by-side PNG so a match can be
+    eyeballed directly. Silently skipped if either video file is unavailable
+    (e.g. re-run from a machine that doesn't have the source videos)."""
+    import cv2
+
+    if not expert_video_path or not worker_video_path or \
+       not Path(expert_video_path).exists() or not Path(worker_video_path).exists():
+        log(f"skipping frame overlays -- video file(s) not found "
+            f"(expert={expert_video_path!r}, worker={worker_video_path!r})")
+        return
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ecap = cv2.VideoCapture(str(expert_video_path))
+    wcap = cv2.VideoCapture(str(worker_video_path))
+
+    def _read(cap, frame_idx):
+        cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, frame_idx))
+        ok, frame = cap.read()
+        return frame if ok else None
+
+    written = 0
+    for i, p in enumerate(pairs):
+        wf, ef = _read(wcap, p["worker_frame"]), _read(ecap, p["expert_frame"])
+        if wf is None or ef is None:
+            continue
+        target_h = 240
+        wf = cv2.resize(wf, (int(wf.shape[1] * target_h / wf.shape[0]), target_h))
+        ef = cv2.resize(ef, (int(ef.shape[1] * target_h / ef.shape[0]), target_h))
+        for img, label in ((wf, f"worker t={p['worker_time']:.2f}s"),
+                           (ef, f"expert E{p['scene']} t={p['expert_time']:.2f}s")):
+            cv2.rectangle(img, (0, 0), (img.shape[1], 22), (0, 0, 0), -1)
+            cv2.putText(img, label, (4, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        combo = cv2.hconcat([wf, ef])
+        cv2.imwrite(str(out_dir / f"{i:03d}_seg_E{p['scene']}_wf{p['worker_frame']}.png"), combo)
+        written += 1
+
+    ecap.release()
+    wcap.release()
+    log(f"wrote {written} frame overlay images to {out_dir}")
+
+
+def save_debug_path(path: list[int], step_times: list[float], out_dir: str | Path,
+                    name: str = "viterbi_path"):
+    """Save the decoded Viterbi state path (scene index per step, -1 = EXTRA)."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    out_dir = Path(out_dir)
+    arr = np.array(path)
+    np.save(out_dir / f"{name}.npy", arr)
+    fig, ax = plt.subplots(figsize=(10, 3))
+    ax.step(step_times, arr, where="post", linewidth=1)
+    ax.set_xlabel("time (s)")
+    ax.set_ylabel("expert scene index (-1 = EXTRA)")
+    ax.set_title(name)
+    fig.tight_layout()
+    fig.savefig(out_dir / f"{name}.png", dpi=120)
     plt.close(fig)
 
 
