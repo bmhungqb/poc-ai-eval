@@ -53,9 +53,8 @@ def changepoint_proposals(df: pd.DataFrame, fps: float) -> list[int]:
     from scipy.signal import find_peaks
 
     signals = []
-    for col in ["needle_flow_mean_mag", "fabric_area_flow_mean_mag",
-                "left_hand_speed", "right_hand_speed",
-                "left_hand_dist_needle", "right_hand_dist_needle"]:
+    for col in ["left_hand_flow_mean_mag", "right_hand_flow_mean_mag",
+                "left_hand_speed", "right_hand_speed"]:
         s = df[col].interpolate(limit_direction="both").fillna(0.0).to_numpy()
         scale = np.percentile(np.abs(s), 95)
         signals.append(s / max(scale, 1e-6))
