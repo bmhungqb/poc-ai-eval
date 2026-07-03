@@ -10,7 +10,9 @@ import numpy as np
 import pandas as pd
 
 from src.io.schemas import OperationSpec, SceneSpec, TaskSpec
-from src.matching.similarity import FEATURE_CHANNELS, SceneTemplate, dtw_distance, frame_nn_score
+from src.matching.similarity import (FEATURE_CHANNELS, FLOW_CHANNELS, KEYPOINT_CHANNELS, WEIGHTS,
+                                     SceneTemplate, dtw_distance, embed_nn_score, frame_nn_score,
+                                     window_scores)
 from src.matching.viterbi_decoder import decode, sharpen_emissions
 from src.reporting.build_report import detect_errors
 from src.matching.viterbi_decoder import DecodedSegment
@@ -94,6 +96,55 @@ class FrameNnScoreTest(unittest.TestCase):
     def test_empty_window_scores_zero(self):
         tpl = self._template(np.random.RandomState(0).randn(10, len(FEATURE_CHANNELS)))
         self.assertEqual(frame_nn_score(_scene_df(np.empty((0, len(FEATURE_CHANNELS)))), tpl), 0.0)
+
+
+class EmbedNnScoreTest(unittest.TestCase):
+    def test_none_when_template_has_no_embeddings(self):
+        tpl = SceneTemplate(0, "s", ["op"], 0.0, 1.0,
+                            _scene_df(np.random.RandomState(0).randn(10, len(FEATURE_CHANNELS))))
+        win_embed = np.random.RandomState(0).randn(5, 384)
+        self.assertIsNone(embed_nn_score(win_embed, tpl))
+
+    def test_none_when_window_has_no_embeddings(self):
+        rng = np.random.RandomState(0)
+        tpl = SceneTemplate(0, "s", ["op"], 0.0, 1.0,
+                            _scene_df(rng.randn(10, len(FEATURE_CHANNELS))),
+                            embed_seg=rng.randn(10, 384))
+        self.assertIsNone(embed_nn_score(None, tpl))
+        self.assertIsNone(embed_nn_score(np.empty((0, 384)), tpl))
+
+    def test_prefers_the_closer_embedding_cluster(self):
+        rng = np.random.RandomState(0)
+        pose = rng.randn(10, len(FEATURE_CHANNELS))
+        embed_a = rng.randn(10, 384)
+        embed_b = embed_a + 10.0
+        tpl_a = SceneTemplate(0, "a", ["op"], 0.0, 1.0, _scene_df(pose), embed_seg=embed_a)
+        tpl_b = SceneTemplate(1, "b", ["op"], 0.0, 1.0, _scene_df(pose), embed_seg=embed_b)
+        probe = embed_a + 0.1
+        self.assertGreater(embed_nn_score(probe, tpl_a), embed_nn_score(probe, tpl_b))
+
+
+class WindowScoresWeightRenormalizationTest(unittest.TestCase):
+    def test_total_is_plain_average_of_ones_regardless_of_embeddings(self):
+        # keypoint/flow/duration/frame_nn/embed all maxed out (window == scene,
+        # matching duration) -> total should be 1.0 whether or not the
+        # image_embed term is present, since weights are renormalized over
+        # whichever terms are actually available.
+        rng = np.random.RandomState(0)
+        pose = rng.randn(24, len(KEYPOINT_CHANNELS) + len(FLOW_CHANNELS))
+        seg = pd.DataFrame(pose, columns=KEYPOINT_CHANNELS + FLOW_CHANNELS)
+        embed = rng.randn(24, 384)
+        tpl_with_embed = SceneTemplate(0, "s", ["op"], 0.0, 1.0, seg, embed_seg=embed)
+        tpl_without_embed = SceneTemplate(0, "s", ["op"], 0.0, 1.0, seg)
+
+        s_with = window_scores(seg, 1.0, tpl_with_embed, win_embed=embed)
+        s_without = window_scores(seg, 1.0, tpl_without_embed, win_embed=None)
+
+        self.assertAlmostEqual(s_with["total"], 1.0, places=3)
+        self.assertAlmostEqual(s_without["total"], 1.0, places=3)
+        self.assertIn("image_embed", s_with)
+        self.assertNotIn("image_embed", s_without)
+        self.assertEqual(sum(WEIGHTS.values()), 1.0)
 
 
 class DetectErrorsUnknownOpsTest(unittest.TestCase):

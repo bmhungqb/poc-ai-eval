@@ -42,8 +42,18 @@ def cmd_match(expert_dir: str, worker_dir: str, course_json: str, out: str):
     worker_df = prepare_features(pd.read_csv(Path(worker_dir) / "frame_features.csv"))
     e_fps, w_fps = expert_meta["fps"], worker_meta["fps"]
 
+    # image embeddings (optional -- absent if features were extracted with an
+    # older version of the pipeline that didn't produce embeddings.npy)
+    expert_embed_path = Path(expert_dir) / "embeddings.npy"
+    worker_embed_path = Path(worker_dir) / "embeddings.npy"
+    expert_embeddings = np.load(expert_embed_path) if expert_embed_path.exists() else None
+    worker_embeddings = np.load(worker_embed_path) if worker_embed_path.exists() else None
+    if expert_embeddings is None or worker_embeddings is None:
+        print("No embeddings.npy found for expert/worker -- image_embed score term "
+              "will be skipped (re-run extract-expert/extract-worker to enable it).")
+
     # expert templates
-    templates = build_templates(expert_df, scenes, e_fps)
+    templates = build_templates(expert_df, scenes, e_fps, expert_embeddings)
     (Path(expert_dir) / "templates.json").write_text(
         json.dumps([t.to_json() for t in templates], ensure_ascii=False, indent=1), encoding="utf-8")
 
@@ -65,9 +75,10 @@ def cmd_match(expert_dir: str, worker_dir: str, course_json: str, out: str):
             if f1 - f0 < 3:
                 continue
             win = worker_df.iloc[f0:f1]
+            win_embed = worker_embeddings[f0:f1] if worker_embeddings is not None else None
             dur = (f1 - f0) / w_fps
             for ti, tpl in enumerate(templates):
-                s = window_scores(win, dur, tpl)["total"]
+                s = window_scores(win, dur, tpl, win_embed=win_embed)["total"]
                 if s > emissions[si, ti]:
                     emissions[si, ti] = s
 

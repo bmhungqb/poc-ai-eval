@@ -3,6 +3,9 @@ opencv-python>=4.9
 # https://github.com/warmshao/WiLoR-mini — pulls in torch/ultralytics/huggingface_hub/scikit-image
 wilor-mini @ git+https://github.com/warmshao/WiLoR-mini
 torch>=2.1
+# DINOv2 (facebook/dinov2-small): frame embedding for image-level nearest-neighbor
+# matching -- self-supervised ViT, no fine-tuning needed, ~22M params.
+transformers>=4.40
 numpy>=1.26
 pandas>=2.2
 scipy>=1.13

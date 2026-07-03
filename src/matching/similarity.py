@@ -1,17 +1,19 @@
 """Feature preparation and similarity scoring between expert scene templates
 and worker candidate windows.
 
-score = 0.35*keypoint + 0.20*flow + 0.15*duration + 0.30*frame_nn
-(image embedding term from the plan is deferred; its weight is folded
-into duration for version 1)
+score = 0.25*keypoint + 0.15*flow + 0.10*duration + 0.20*frame_nn + 0.30*image_embed
+(weights renormalized over whichever terms are actually available -- see
+window_scores -- so this still works on frame_features.csv/embeddings.npy
+produced by an older version of the extraction pipeline)
 
 keypoint/flow are DTW distances between the window and the scene, both
 resampled to a fixed length (DTW_SAMPLES) — this assumes a roughly linear
-time correspondence between window and scene. frame_nn complements that: it
-queries each *raw* worker frame in the window against the scene's raw
-per-frame feature cloud (native resolution, no resampling), which is more
-directly what "does this worker frame look like something from this expert
-scene" means, and is not tied to a linear-warp assumption.
+time correspondence between window and scene. frame_nn and image_embed both
+complement that with a Chamfer-style per-frame nearest-neighbor query (no
+resampling, no linear-warp assumption): frame_nn over the raw hand
+keypoint/flow features, image_embed over a DINOv2 visual embedding of the
+hands' crop (src/vision/embed_model.py) -- so image_embed can pick up on
+visual state (fabric/tool position) that pose/flow features don't encode.
 """
 from __future__ import annotations
 
@@ -19,7 +21,7 @@ import numpy as np
 import pandas as pd
 from scipy.spatial import cKDTree
 
-WEIGHTS = {"keypoint": 0.35, "flow": 0.20, "duration": 0.15, "frame_nn": 0.30}
+WEIGHTS = {"keypoint": 0.25, "flow": 0.15, "duration": 0.10, "frame_nn": 0.20, "image_embed": 0.30}
 
 KEYPOINT_CHANNELS = [
     "left_hand_cx", "left_hand_cy", "right_hand_cx", "right_hand_cy",
@@ -97,12 +99,14 @@ def duration_score(worker_dur: float, expert_dur: float) -> float:
 
 
 class SceneTemplate:
-    """Pre-resampled expert scene signals, plus a KD-tree over the scene's
-    raw (unresampled) per-frame features for frame-level nearest-neighbor
-    queries (see frame_nn_score)."""
+    """Pre-resampled expert scene signals, plus KD-trees over the scene's raw
+    (unresampled) per-frame features -- pose/flow (frame_nn_score) and
+    DINOv2 image embedding (embed_nn_score) -- for frame-level
+    nearest-neighbor queries."""
 
     def __init__(self, scene_index: int, label: str, operations: list[str],
-                 start: float, end: float, seg: pd.DataFrame):
+                 start: float, end: float, seg: pd.DataFrame,
+                 embed_seg: np.ndarray | None = None):
         self.scene_index = scene_index
         self.label = label
         self.operations = operations
@@ -113,6 +117,8 @@ class SceneTemplate:
         self.flow = resample(seg[FLOW_CHANNELS].to_numpy())
         raw = seg[FEATURE_CHANNELS].to_numpy()
         self.kdtree = cKDTree(raw) if len(raw) > 0 else None
+        self.embed_kdtree = (cKDTree(embed_seg) if embed_seg is not None and len(embed_seg) > 0
+                             else None)
 
     def to_json(self) -> dict:
         return {
@@ -123,41 +129,68 @@ class SceneTemplate:
         }
 
 
-def build_templates(expert_df: pd.DataFrame, scenes, fps: float) -> list[SceneTemplate]:
+def build_templates(expert_df: pd.DataFrame, scenes, fps: float,
+                    expert_embeddings: np.ndarray | None = None) -> list[SceneTemplate]:
     templates = []
     for sc in scenes:
         f0, f1 = int(sc.start * fps), max(int(sc.end * fps), int(sc.start * fps) + 2)
         seg = expert_df.iloc[f0:f1]
-        templates.append(SceneTemplate(sc.scene_index, sc.label, sc.operations, sc.start, sc.end, seg))
+        embed_seg = expert_embeddings[f0:f1] if expert_embeddings is not None else None
+        templates.append(SceneTemplate(sc.scene_index, sc.label, sc.operations, sc.start, sc.end,
+                                       seg, embed_seg))
     return templates
 
 
-def frame_nn_score(win: pd.DataFrame, tpl: SceneTemplate, temperature: float = 1.0) -> float:
-    """Chamfer-style per-frame nearest-neighbor score: for every raw worker
-    frame in the window, query its nearest raw expert frame within the scene
-    (native resolution -- each worker frame effectively "asks" the expert
-    scene "which of your frames do I look most like"), then average those
-    distances into a single score. Unlike the DTW score this needs no
-    resampling and makes no linear-time-correspondence assumption, so it can
-    catch a real match even when the window's internal pacing doesn't line
-    up with the scene's.
-    """
-    if tpl.kdtree is None or len(win) == 0:
-        return 0.0
-    feats = win[FEATURE_CHANNELS].to_numpy()
-    dists, _ = tpl.kdtree.query(feats)
+def _chamfer_score(query: np.ndarray, tree: cKDTree | None, temperature: float) -> float | None:
+    """Mean nearest-neighbor distance from each row of `query` to `tree`,
+    converted to a similarity score. None if the query or tree is empty."""
+    if tree is None or len(query) == 0:
+        return None
+    dists, _ = tree.query(query)
     return float(np.exp(-dists.mean() / temperature))
 
 
+def frame_nn_score(win: pd.DataFrame, tpl: SceneTemplate, temperature: float = 1.0) -> float:
+    """Chamfer-style per-frame nearest-neighbor score over raw hand
+    keypoint/flow features: for every raw worker frame in the window, query
+    its nearest raw expert frame within the scene (native resolution --
+    each worker frame effectively "asks" the expert scene "which of your
+    frames do I look most like"), then average those distances into a
+    single score. Unlike the DTW score this needs no resampling and makes
+    no linear-time-correspondence assumption, so it can catch a real match
+    even when the window's internal pacing doesn't line up with the scene's.
+    """
+    if len(win) == 0:
+        return 0.0
+    return _chamfer_score(win[FEATURE_CHANNELS].to_numpy(), tpl.kdtree, temperature) or 0.0
+
+
+def embed_nn_score(win_embed: np.ndarray | None, tpl: SceneTemplate, temperature: float = 0.5) -> float | None:
+    """Same Chamfer-style nearest-neighbor query as frame_nn_score, but over
+    DINOv2 image embeddings of the hands' crop instead of pose/flow
+    features -- see src/vision/embed_model.py. Returns None (not 0.0) when
+    embeddings aren't available, so window_scores can drop this term from
+    the weighted average entirely rather than penalizing every window
+    equally for missing data."""
+    if win_embed is None or len(win_embed) == 0:
+        return None
+    return _chamfer_score(win_embed, tpl.embed_kdtree, temperature)
+
+
 def window_scores(win: pd.DataFrame, win_duration: float, tpl: SceneTemplate,
-                  kp_temp: float = 1.0, flow_temp: float = 1.0,
-                  nn_temp: float = 1.0) -> dict[str, float]:
+                  kp_temp: float = 1.0, flow_temp: float = 1.0, nn_temp: float = 1.0,
+                  win_embed: np.ndarray | None = None, embed_temp: float = 0.5) -> dict[str, float]:
     kp = resample(win[KEYPOINT_CHANNELS].to_numpy())
     fl = resample(win[FLOW_CHANNELS].to_numpy())
-    s_kp = dtw_score(kp, tpl.kp, kp_temp)
-    s_fl = dtw_score(fl, tpl.flow, flow_temp)
-    s_du = duration_score(win_duration, tpl.duration)
-    s_nn = frame_nn_score(win, tpl, nn_temp)
-    total = (WEIGHTS["keypoint"] * s_kp + WEIGHTS["flow"] * s_fl
-             + WEIGHTS["duration"] * s_du + WEIGHTS["frame_nn"] * s_nn)
-    return {"total": total, "keypoint": s_kp, "flow": s_fl, "duration": s_du, "frame_nn": s_nn}
+    scores = {
+        "keypoint": dtw_score(kp, tpl.kp, kp_temp),
+        "flow": dtw_score(fl, tpl.flow, flow_temp),
+        "duration": duration_score(win_duration, tpl.duration),
+        "frame_nn": frame_nn_score(win, tpl, nn_temp),
+    }
+    s_embed = embed_nn_score(win_embed, tpl, embed_temp)
+    if s_embed is not None:
+        scores["image_embed"] = s_embed
+    weight_sum = sum(WEIGHTS[k] for k in scores)
+    total = sum(WEIGHTS[k] * v for k, v in scores.items()) / weight_sum
+    return {"total": total, **scores}

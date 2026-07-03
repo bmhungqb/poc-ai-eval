@@ -16,11 +16,15 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
+from src.vision.embed_model import MODEL_NAME as EMBED_MODEL_NAME
+from src.vision.embed_model import DinoEmbedder
 from src.vision.hand_model import WiLorHand
 
 FLOW_SCALE_WIDTH = 320   # dense flow computed on a downscaled gray frame
 HAND_SCORE_THRESH = 0.3  # min YOLO hand-detector confidence to accept a detected hand
                          # (gloved hands on low-res factory footage score low)
+EMBED_PAD_FRAC = 0.3     # pad the hands' union bbox by this fraction before embedding,
+                         # so the crop includes a bit of the fabric/tool around the hands
 
 
 def _bbox_to_pixels(bbox: list[float], width: int, height: int) -> tuple[int, int, int, int]:
@@ -46,6 +50,22 @@ def _hand_summary(kps: np.ndarray, score: float) -> dict:
         "thumb_tip": [float(kps[4, 0]), float(kps[4, 1])],
         "keypoints": kps.tolist(),
     }
+
+
+def _embed_crop_bbox(hand_info: dict, width: int, height: int) -> tuple[int, int, int, int]:
+    """Padded pixel bbox around whichever hands are present, for the
+    embedding crop. Falls back to the full frame if neither hand is
+    detected (still gives the embedding model something to work with)."""
+    boxes = [_bbox_to_pixels(hi["bbox"], width, height) for hi in hand_info.values() if hi]
+    if not boxes:
+        return 0, 0, width, height
+    x1 = min(b[0] for b in boxes)
+    y1 = min(b[1] for b in boxes)
+    x2 = max(b[2] for b in boxes)
+    y2 = max(b[3] for b in boxes)
+    pad_x, pad_y = int((x2 - x1) * EMBED_PAD_FRAC), int((y2 - y1) * EMBED_PAD_FRAC)
+    return (max(0, x1 - pad_x), max(0, y1 - pad_y),
+            min(width, x2 + pad_x), min(height, y2 + pad_y))
 
 
 def _flow_stats(flow: np.ndarray, bbox_px: tuple[int, int, int, int], scale: float) -> dict:
@@ -94,8 +114,10 @@ def extract_video_features(
         )
 
     hand_model = WiLorHand(conf_thresh=HAND_SCORE_THRESH)  # YOLO hand det + WiLoR 3D pose
+    embedder = DinoEmbedder()  # frame-level embedding for image_embed nearest-neighbor score
 
     rows: list[dict] = []
+    embeddings: list[np.ndarray] = []
     prev_gray = None
     prev_hand_pos = {"left": None, "right": None}
     prev_hand_speed = {"left": 0.0, "right": 0.0}
@@ -120,6 +142,10 @@ def extract_video_features(
         for side in ("left", "right"):
             if by_side[side]:
                 hand_info[side] = max(by_side[side], key=lambda s: s["score"])
+
+        # --- image embedding (hands' union bbox, padded) ---
+        ex1, ey1, ex2, ey2 = _embed_crop_bbox(hand_info, width, height)
+        embeddings.append(embedder(frame[ey1:ey2, ex1:ex2]))
 
         # --- optical flow ---
         flow_feats = {}
@@ -196,6 +222,9 @@ def extract_video_features(
     df = pd.DataFrame(rows)
     df.attrs["fps"] = fps
     df.to_csv(out_dir / "frame_features.csv", index=False)
+    embed_arr = np.stack(embeddings).astype(np.float32)
+    np.save(out_dir / "embeddings.npy", embed_arr)
     (out_dir / "meta.json").write_text(json.dumps(
-        {"video": str(video_path), "fps": fps, "width": width, "height": height, "n_frames": len(df)}))
+        {"video": str(video_path), "fps": fps, "width": width, "height": height, "n_frames": len(df),
+         "embed_model": EMBED_MODEL_NAME, "embed_dim": embed_arr.shape[1]}))
     return df
